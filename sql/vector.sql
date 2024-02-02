@@ -243,6 +243,13 @@ CREATE ACCESS METHOD hnsw TYPE INDEX HANDLER hnswhandler;
 
 COMMENT ON ACCESS METHOD hnsw IS 'hnsw index access method';
 
+CREATE FUNCTION pineconehandler(internal) RETURNS index_am_handler
+	AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE ACCESS METHOD pinecone TYPE INDEX HANDLER pineconehandler;
+
+COMMENT ON ACCESS METHOD pinecone IS 'pinecone index access method';
+
 -- opclasses
 
 CREATE OPERATOR CLASS vector_ops
@@ -290,3 +297,7 @@ CREATE OPERATOR CLASS vector_cosine_ops
 	OPERATOR 1 <=> (vector, vector) FOR ORDER BY float_ops,
 	FUNCTION 1 vector_negative_inner_product(vector, vector),
 	FUNCTION 2 vector_norm(vector);
+
+CREATE OPERATOR CLASS vector_l2_ops
+	FOR TYPE vector USING pinecone AS
+	OPERATOR 1 <-> (vector, vector) FOR ORDER BY float_ops;
