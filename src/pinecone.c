@@ -1,4 +1,6 @@
 #include "postgres.h"
+
+#include "catalog/index.h"
 #include "access/amapi.h"
 #include "vector.h"
 #include "pinecone_api.h"
@@ -8,16 +10,66 @@
 #include <nodes/pathnodes.h>
 #include <utils/array.h>
 #include "access/relscan.h"
+#include <access/generic_xlog.h>
+#include <storage/bufmgr.h>
 
 IndexBuildResult *no_build(Relation heap, Relation index, IndexInfo *indexInfo)
 {
+    elog(NOTICE, "no_build");
+    CreateMetaPage(index, 5, 100, MAIN_FORKNUM);
     IndexBuildResult *result = palloc(sizeof(IndexBuildResult));
     result->heap_tuples = 0;
     result->index_tuples = 0;
     return result;
 }
-
 void no_buildempty(Relation index){};
+
+#define PineconePageGetOpaque(page)	((PineconePageOpaque) PageGetSpecialPointer(page))
+#define PineconePageGetMeta(page)	((PineconeMetaPageData *) PageGetContents(page))
+typedef struct PineconePageOpaqueData
+{
+    uint16 flags;
+} PineconePageOpaqueData;
+typedef PineconePageOpaqueData *PineconePageOpaque;
+
+typedef struct PineconeMetaPageData
+{
+    int dimensions;
+    int lists;
+} PineconeMetaPageData;
+typedef PineconeMetaPageData *PineconeMetaPage;
+
+void CreateMetaPage(Relation index, int dimensions, int lists, int forkNum)
+{
+    elog(NOTICE, "CreateMetaPage");
+    Buffer buf;
+    Page page; // a page is a block of memory, formatted as a page
+    PineconeMetaPage metap;
+    GenericXLogState *state;
+    // create a new buffer
+    buf = ReadBufferExtended(index, forkNum, P_NEW, RBM_NORMAL, NULL);
+    LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE); // lock the buffer in exclusive mode meaning no other process can access it
+    // register and initialize the page
+    state = GenericXLogStart(index);
+    page = GenericXLogRegisterBuffer(state, buf, GENERIC_XLOG_FULL_IMAGE);
+    PageInit(page, BufferGetPageSize(buf), sizeof(PineconeMetaPageData)); // third arg is the sizeof the page's opaque data
+    metap = PineconePageGetMeta(page);
+    metap->dimensions = dimensions;
+    metap->lists = lists;
+    ((PageHeader) page)->pd_lower = ((char *) metap - (char *) page) + sizeof(PineconeMetaPageData);
+    // cleanup
+    GenericXLogFinish(state);
+    UnlockReleaseBuffer(buf);
+    elog(NOTICE, "CreateMetaPage done");
+}
+
+void pinecone_buildempty(Relation index)
+{
+    // IndexInfo *indexInfo = BuildIndexInfo(index);
+	// BuildIndex(NULL, index, indexInfo, &buildstate, INIT_FORKNUM);
+	// CreateMetaPage(index, buildstate->dimensions, buildstate->lists, forkNum);
+    CreateMetaPage(index, 5, 100, INIT_FORKNUM);
+}
 
 /*
  * Insert a tuple into the index
@@ -87,6 +139,7 @@ default_beginscan(Relation index, int nkeys, int norderbys)
 /*
  * Start or restart an index scan
  */
+#define PINECONE_METAPAGE_BLKNO 0
 void
 pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int norderbys)
 {
@@ -94,6 +147,20 @@ pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, i
 	cJSON *query_vector_values;
 	cJSON *pinecone_response;
 	cJSON *matches;
+    // metadata
+    Buffer buf;
+    Page page;
+    PineconeMetaPage metap;
+    // log the metadata
+    elog(NOTICE, "nkeys: %d", nkeys);
+    buf = ReadBuffer(scan->indexRelation, PINECONE_METAPAGE_BLKNO);
+    LockBuffer(buf, BUFFER_LOCK_SHARE);
+    page = BufferGetPage(buf);
+    metap = PineconePageGetMeta(page);
+    elog(NOTICE, "dimensions: %d; lists: %d", metap->dimensions, metap->lists);
+    UnlockReleaseBuffer(buf);
+    // query pinecone
+
 
 	if (orderbys && scan->numberOfOrderBys > 0) {
 		vec = DatumGetVector(orderbys[0].sk_argument);
@@ -169,7 +236,7 @@ Datum pineconehandler(PG_FUNCTION_ARGS)
 
     /* Interface functions */
     amroutine->ambuild = no_build;
-    amroutine->ambuildempty = no_buildempty;
+    amroutine->ambuildempty = pinecone_buildempty;
     amroutine->aminsert = pinecone_insert;
     amroutine->ambulkdelete = no_bulkdelete;
     amroutine->amvacuumcleanup = no_vacuumcleanup;

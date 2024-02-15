@@ -28,6 +28,11 @@ extern void pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey
 extern bool pinecone_gettuple(IndexScanDesc scan, ScanDirection dir);
 extern void no_endscan(IndexScanDesc scan);
 
+
+// void CreateMetaPage(Relation index, int dimensions, int lists, int forkNum)
+extern void pinecone_buildempty(Relation index);
+extern void CreateMetaPage(Relation index, int dimensions, int lists, int forkNum);
+
 PGDLLEXPORT Datum pineconehandler(PG_FUNCTION_ARGS);
 
 #endif /* PINECONE_INDEX_AM_H */
