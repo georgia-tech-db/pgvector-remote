@@ -7,6 +7,7 @@
 #include "fmgr.h"
 #include "hnsw.h"
 #include "ivfflat.h"
+#include "pinecone.h"
 #include "lib/stringinfo.h"
 #include "libpq/pqformat.h"
 #include "port.h"				/* for strtof() */
@@ -40,6 +41,7 @@ _PG_init(void)
 {
 	HnswInit();
 	IvfflatInit();
+	PineconeInit();	
 }
 
 /*

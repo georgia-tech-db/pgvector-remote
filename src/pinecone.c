@@ -12,12 +12,84 @@
 #include "access/relscan.h"
 #include <access/generic_xlog.h>
 #include <storage/bufmgr.h>
+#include "utils/guc.h"
+#include "utils/builtins.h"
+#include <access/reloptions.h>
+#include <catalog/pg_attribute.h>
+#include <unistd.h>
+
+#define PINECONE_METAPAGE_BLKNO 0
+typedef struct PineconeOptions
+{
+	int32		vl_len_;		/* varlena header (do not touch directly!) */
+    int         spec; // spec is a string; this is its offset in the rd_options
+}			PineconeOptions;
+
+char *pinecone_api_key = NULL;
+static relopt_kind pinecone_relopt_kind;
+
+void
+PineconeInit(void)
+{
+    pinecone_relopt_kind = add_reloption_kind();
+    add_string_reloption(pinecone_relopt_kind, "spec",
+                            "Specification of the Pinecone Index. Refer to https://docs.pinecone.io/reference/create_index",
+                             "defa",
+                            NULL,
+                             AccessExclusiveLock);
+    // add_int_reloption(pinecone_relopt_kind, "spec", "Pinecone configuration",
+                      // 0, 0, 10, AccessExclusiveLock);
+    DefineCustomStringVariable("pinecone.api_key",
+                              "Pinecone API key",
+                              "Pinecone API key",
+                              &pinecone_api_key,
+                              NULL,
+                              PGC_SUSET, // restrict to superusers, takes immediate effect and is not saved in the configuration file 
+                              0,
+                              NULL,
+                              NULL,
+                              NULL);
+    MarkGUCPrefixReserved("pinecone");
+}
+
+
+
+// setup guc for api key
+// void _PG_init(void);
+// variable
 
 IndexBuildResult *no_build(Relation heap, Relation index, IndexInfo *indexInfo)
 {
-    elog(NOTICE, "no_build");
-    CreateMetaPage(index, 5, 100, MAIN_FORKNUM);
+    cJSON *create_response;
+    char *spec;
+    char *host;
+    int dimensions;
+    char *pinecone_index_name = (char *) palloc(100);
+    cJSON *describe_index_response;
+    PineconeOptions *opts = (PineconeOptions *) index->rd_options;
     IndexBuildResult *result = palloc(sizeof(IndexBuildResult));
+    // the user specified the column as vector(1536), we need to tell pinecone the dimensionality=1536
+    dimensions = TupleDescAttr(index->rd_att, 0)->atttypmod;
+    // create a pinecone_index_name like _pgvector_remote_{rd_id}
+    snprintf(pinecone_index_name, 100, "pgvector-remote-index-oid-%d", index->rd_id);
+    //
+    spec = GET_STRING_RELOPTION(opts, spec);
+    create_response = create_index(pinecone_api_key, pinecone_index_name, dimensions, "cosine", spec);
+    // log the response host
+    host = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(create_response, "host"));
+    CreateMetaPage(index, dimensions, host, pinecone_index_name, MAIN_FORKNUM);
+    // now we need to wait until the pinecone index is done initializing
+    sleep(1); // sleep for 1 second to allow pinecone to register the index.
+    while (true)
+    {
+        describe_index_response = describe_index(pinecone_api_key, pinecone_index_name);
+        if (cJSON_IsTrue(cJSON_GetObjectItem(cJSON_GetObjectItem(describe_index_response, "status"), "ready")))
+        {
+            break;
+        }
+        elog(NOTICE, "Waiting for index to be ready ... %s", cJSON_Print(describe_index_response));
+        sleep(1);
+    }
     result->heap_tuples = 0;
     result->index_tuples = 0;
     return result;
@@ -32,16 +104,8 @@ typedef struct PineconePageOpaqueData
 } PineconePageOpaqueData;
 typedef PineconePageOpaqueData *PineconePageOpaque;
 
-typedef struct PineconeMetaPageData
+void CreateMetaPage(Relation index, int dimensions, char *host, char *pinecone_index_name, int forkNum)
 {
-    int dimensions;
-    int lists;
-} PineconeMetaPageData;
-typedef PineconeMetaPageData *PineconeMetaPage;
-
-void CreateMetaPage(Relation index, int dimensions, int lists, int forkNum)
-{
-    elog(NOTICE, "CreateMetaPage");
     Buffer buf;
     Page page; // a page is a block of memory, formatted as a page
     PineconeMetaPage metap;
@@ -55,20 +119,31 @@ void CreateMetaPage(Relation index, int dimensions, int lists, int forkNum)
     PageInit(page, BufferGetPageSize(buf), sizeof(PineconeMetaPageData)); // third arg is the sizeof the page's opaque data
     metap = PineconePageGetMeta(page);
     metap->dimensions = dimensions;
-    metap->lists = lists;
+    strcpy(metap->host, host);
+    strcpy(metap->pinecone_index_name, pinecone_index_name);
     ((PageHeader) page)->pd_lower = ((char *) metap - (char *) page) + sizeof(PineconeMetaPageData);
     // cleanup
     GenericXLogFinish(state);
     UnlockReleaseBuffer(buf);
-    elog(NOTICE, "CreateMetaPage done");
+}
+PineconeMetaPageData ReadMetaPage(Relation index) {
+    Buffer buf;
+    Page page;
+    PineconeMetaPage metap;
+    buf = ReadBuffer(index, PINECONE_METAPAGE_BLKNO);
+    LockBuffer(buf, BUFFER_LOCK_SHARE);
+    page = BufferGetPage(buf);
+    metap = PineconePageGetMeta(page);
+    elog(NOTICE, "dimensions: %d; host: %s", metap->dimensions, metap->host);
+    UnlockReleaseBuffer(buf);
+    return *metap;
 }
 
 void pinecone_buildempty(Relation index)
 {
     // IndexInfo *indexInfo = BuildIndexInfo(index);
 	// BuildIndex(NULL, index, indexInfo, &buildstate, INIT_FORKNUM);
-	// CreateMetaPage(index, buildstate->dimensions, buildstate->lists, forkNum);
-    CreateMetaPage(index, 5, 100, INIT_FORKNUM);
+    // CreateMetaPage(index, 5, 100, INIT_FORKNUM);
 }
 
 /*
@@ -87,12 +162,41 @@ bool pinecone_insert(Relation index, Datum *values, bool *isnull, ItemPointer he
     cJSON *json_values;
     cJSON *json_vector;
     char vector_id[6 + 1]; // derive the vector_id from the heap_tid
+    cJSON *metadata;
+    PineconeMetaPageData pinecone_meta;
+    pinecone_meta = ReadMetaPage(index);
+    metadata = cJSON_CreateObject();
+    for (int i = 0; i < index->rd_att->natts; i++)
+    {
+        // use a macro to get the attribute datatype TupleDescAttr(index->rd_att, i)
+        FormData_pg_attribute* td = TupleDescAttr(index->rd_att, i);
+        elog(NOTICE, "tuple desc %s", td->attname.data);
+        if (td->atttypid == BOOLOID)
+        {
+            elog(NOTICE, "bool: %d", DatumGetBool(values[i]));
+            cJSON_AddItemToObject(metadata, td->attname.data, cJSON_CreateBool(DatumGetBool(values[i])));
+        } else if (td->atttypid == FLOAT8OID)
+        {
+            elog(NOTICE, "float8: %f", DatumGetFloat8(values[i]));
+            cJSON_AddItemToObject(metadata, td->attname.data, cJSON_CreateNumber(DatumGetFloat8(values[i])));
+        } else if (td->atttypid == TEXTOID)
+        {
+            elog(NOTICE, "text: %s", TextDatumGetCString(values[i]));
+            cJSON_AddItemToObject(metadata, td->attname.data, cJSON_CreateString(TextDatumGetCString(values[i])));
+        }
+    }
+    // log the metadata
+    elog(NOTICE, "metadata: %s", cJSON_Print(metadata));
     snprintf(vector_id, sizeof(vector_id), "%02x%02x%02x", heap_tid->ip_blkid.bi_hi, heap_tid->ip_blkid.bi_lo, heap_tid->ip_posid);
     json_values = cJSON_CreateFloatArray(vector->x, vector->dim);
     json_vector = cJSON_CreateObject();
     cJSON_AddItemToObject(json_vector, "id", cJSON_CreateString(vector_id));
     cJSON_AddItemToObject(json_vector, "values", json_values);
-    pinecone_upsert_one("5b2c1031-ba58-4acc-a634-9f943d68822c", "t1-23kshha.svc.apw5-4e34-81fa.pinecone.io", json_vector);
+    cJSON_AddItemToObject(json_vector, "metadata", metadata);
+    elog(NOTICE, "payload: %s", cJSON_Print(json_vector));
+    elog(NOTICE, "host: %s", pinecone_meta.host);
+    elog(NOTICE, "api_key: %s", pinecone_api_key);
+    pinecone_upsert_one(pinecone_api_key, pinecone_meta.host, json_vector);
     return false;
 }
 
@@ -112,11 +216,25 @@ no_costestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 					Cost *indexStartupCost, Cost *indexTotalCost,
 					Selectivity *indexSelectivity, double *indexCorrelation,
 					double *indexPages)
-{};
+{
+    if (list_length(path->indexorderbycols) == 0 || linitial_int(path->indexorderbycols) != 0) {
+        elog(NOTICE, "Index must be ordered by the first column");
+        *indexTotalCost = 1000000;
+        return;
+    }
+};
+
+
 
 bytea * no_options(Datum reloptions, bool validate)
 {
-    return NULL;
+	static const relopt_parse_elt tab[] = {
+		{"spec", RELOPT_TYPE_STRING, offsetof(PineconeOptions, spec)},
+	};
+	return (bytea *) build_reloptions(reloptions, validate,
+									  pinecone_relopt_kind,
+									  sizeof(PineconeOptions),
+									  tab, lengthof(tab));
 }
 
 bool
@@ -139,38 +257,70 @@ default_beginscan(Relation index, int nkeys, int norderbys)
 /*
  * Start or restart an index scan
  */
-#define PINECONE_METAPAGE_BLKNO 0
 void
 pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int norderbys)
 {
+    // {"$and": [{"flag": {"$eq": true}}, {"price": {"$lt": 10}}]}  // example filter
 	Vector * vec;
 	cJSON *query_vector_values;
 	cJSON *pinecone_response;
 	cJSON *matches;
-    // metadata
-    Buffer buf;
-    Page page;
-    PineconeMetaPage metap;
+    PineconeMetaPageData pinecone_metadata;
+    // filter
+    const char* pinecone_filter_operators[] = {"$lt", "$lte", "$eq", "$gte", "$gt", "$ne"};
+    cJSON *filter;
+    cJSON *and_list;
     // log the metadata
     elog(NOTICE, "nkeys: %d", nkeys);
-    buf = ReadBuffer(scan->indexRelation, PINECONE_METAPAGE_BLKNO);
-    LockBuffer(buf, BUFFER_LOCK_SHARE);
-    page = BufferGetPage(buf);
-    metap = PineconePageGetMeta(page);
-    elog(NOTICE, "dimensions: %d; lists: %d", metap->dimensions, metap->lists);
-    UnlockReleaseBuffer(buf);
-    // query pinecone
+    pinecone_metadata = ReadMetaPage(scan->indexRelation);    
 
 
-	if (orderbys && scan->numberOfOrderBys > 0) {
-		vec = DatumGetVector(orderbys[0].sk_argument);
-		query_vector_values = cJSON_CreateFloatArray(vec->x, vec->dim);
-		pinecone_response = pinecone_api_query_index("5b2c1031-ba58-4acc-a634-9f943d68822c", "t1-23kshha.svc.apw5-4e34-81fa.pinecone.io", 5, query_vector_values);
-		// copy pinecone_response to scan opaque
-		// response has a matches array, set opaque to the child of matches aka first match
-		matches = cJSON_GetObjectItemCaseSensitive(pinecone_response, "matches");
-		scan->opaque = matches->child;
-	}
+    if (scan->numberOfOrderBys == 0 || orderbys[0].sk_attno != 1) {
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("Index must be ordered by the first column")));
+    }
+    
+    // build the filter
+    filter = cJSON_CreateObject();
+    and_list = cJSON_CreateArray();
+    // iterate thru the keys and build the filter
+    for (int i = 0; i < nkeys; i++)
+    {
+        elog(NOTICE, "key n: %d", i);
+        cJSON *key_filter = cJSON_CreateObject();
+        cJSON *condition = cJSON_CreateObject();
+        cJSON *condition_value;
+        FormData_pg_attribute* td = TupleDescAttr(scan->indexRelation->rd_att, keys[i].sk_attno - 1);
+        elog(NOTICE, "tuple desc %s", td->attname.data);
+        if (td->atttypid == BOOLOID)
+        {
+            condition_value = cJSON_CreateBool(DatumGetBool(keys[i].sk_argument));
+        } else if (td->atttypid == FLOAT8OID)
+        {
+            condition_value = cJSON_CreateNumber(DatumGetFloat8(keys[i].sk_argument));
+        } else 
+        {
+            condition_value = cJSON_CreateString(TextDatumGetCString(keys[i].sk_argument));
+        } 
+        // this only works if all datatypes use the same strategy naming convention.
+        cJSON_AddItemToObject(condition, pinecone_filter_operators[keys[i].sk_strategy - 1], condition_value);
+        cJSON_AddItemToObject(key_filter, td->attname.data, condition);
+        elog(NOTICE, "key_filter: %s", cJSON_Print(condition));
+        cJSON_AddItemToArray(and_list, key_filter);
+    }
+    cJSON_AddItemToObject(filter, "$and", and_list);
+    elog(NOTICE, "filter: %s", cJSON_Print(filter));
+
+	// get the query vector
+    vec = DatumGetVector(orderbys[0].sk_argument);
+    query_vector_values = cJSON_CreateFloatArray(vec->x, vec->dim);
+    pinecone_response = pinecone_api_query_index(pinecone_api_key, pinecone_metadata.host, 3, query_vector_values, filter);
+    elog(NOTICE, "pinecone_response: %s", cJSON_Print(pinecone_response));
+    // copy pinecone_response to scan opaque
+    // response has a matches array, set opaque to the child of matches aka first match
+    matches = cJSON_GetObjectItemCaseSensitive(pinecone_response, "matches");
+    scan->opaque = matches->child;
 }
 
 /*
@@ -219,7 +369,7 @@ Datum pineconehandler(PG_FUNCTION_ARGS)
     amroutine->amcanorderbyop = true;
     amroutine->amcanbackward = false; /* can change direction mid-scan */
     amroutine->amcanunique = false;
-    amroutine->amcanmulticol = false; /* TODO: pinecone can support filtered search */
+    amroutine->amcanmulticol = true; /* TODO: pinecone can support filtered search */
     amroutine->amoptionalkey = true;
     amroutine->amsearcharray = false;
     amroutine->amsearchnulls = false;

@@ -11,6 +11,15 @@
 #include <utils/array.h>
 #include "access/relscan.h"
 
+// structs
+typedef struct PineconeMetaPageData
+{
+    int dimensions;
+    char host[100];
+    char pinecone_index_name[60];
+} PineconeMetaPageData;
+
+typedef PineconeMetaPageData *PineconeMetaPage;
 extern IndexBuildResult *no_build(Relation heap, Relation index, IndexInfo *indexInfo);
 extern void no_buildempty(Relation index);
 extern bool pinecone_insert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heap, IndexUniqueCheck checkUnique
@@ -31,8 +40,9 @@ extern void no_endscan(IndexScanDesc scan);
 
 // void CreateMetaPage(Relation index, int dimensions, int lists, int forkNum)
 extern void pinecone_buildempty(Relation index);
-extern void CreateMetaPage(Relation index, int dimensions, int lists, int forkNum);
-
+extern void CreateMetaPage(Relation index, int dimensions, char *host, char *pinecone_index_name, int forkNum);
+extern PineconeMetaPageData ReadMetaPage(Relation index);
+void		PineconeInit(void);
 PGDLLEXPORT Datum pineconehandler(PG_FUNCTION_ARGS);
 
 #endif /* PINECONE_INDEX_AM_H */

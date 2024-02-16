@@ -298,6 +298,38 @@ CREATE OPERATOR CLASS vector_cosine_ops
 	FUNCTION 1 vector_negative_inner_product(vector, vector),
 	FUNCTION 2 vector_norm(vector);
 
+-- pinecone opclasses
+
 CREATE OPERATOR CLASS vector_l2_ops
-	FOR TYPE vector USING pinecone AS
+	DEFAULT FOR TYPE vector USING pinecone AS
 	OPERATOR 1 <-> (vector, vector) FOR ORDER BY float_ops;
+
+-- dummy boolean opclass for pinecone
+CREATE OPERATOR CLASS bool_pinecone_ops
+	DEFAULT FOR TYPE boolean USING pinecone AS
+	OPERATOR 3 = (boolean, boolean),
+	OPERATOR 6 != (boolean, boolean);
+
+-- text opclass for pinecone
+CREATE OPERATOR CLASS text_pinecone_ops
+	DEFAULT FOR TYPE text USING pinecone AS
+	OPERATOR 3 = (text, text),
+	OPERATOR 6 != (text, text);
+
+-- float opclass for pinecone
+CREATE OPERATOR CLASS float_pinecone_ops
+	DEFAULT FOR TYPE float8 USING pinecone AS
+	OPERATOR 1 < (float8, float8),
+	OPERATOR 2 <= (float8, float8),
+	OPERATOR 3 = (float8, float8),
+	OPERATOR 4 >= (float8, float8),
+	OPERATOR 5 > (float8, float8),
+	OPERATOR 6 != (float8, float8);
+
+-- we want consistent naming
+-- < 1
+-- <= 2
+-- = 3
+-- >= 4
+-- > 5
+-- != 6
