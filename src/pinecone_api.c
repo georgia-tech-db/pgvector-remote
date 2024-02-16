@@ -24,14 +24,13 @@ void set_curl_options(CURL *hnd, const char *api_key, const char *url, const cha
 
 cJSON* describe_index(const char *api_key, const char *index_name) {
     CURL *hnd = curl_easy_init();
-    CURLcode ret;
     cJSON *response_json;
     char response_data[40960] = "";
     FILE *response_stream = fmemopen(response_data, sizeof(response_data), "w");
     char url[100] = "https://api.pinecone.io/indexes/"; strcat(url, index_name);
     set_curl_options(hnd, api_key, url, "GET");
     curl_easy_setopt(hnd, CURLOPT_WRITEDATA, response_stream);
-    ret = curl_easy_perform(hnd);
+    curl_easy_perform(hnd);
     fflush(response_stream);
     elog(NOTICE, "Response data: %s", response_data);
     response_json = cJSON_Parse(response_data);

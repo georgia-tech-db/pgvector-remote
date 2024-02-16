@@ -17,8 +17,13 @@
 #include <access/reloptions.h>
 #include <catalog/pg_attribute.h>
 #include <unistd.h>
+#include "executor/spi.h"
+#include "utils/memutils.h"
+#include "storage/lmgr.h"
 
 #define PINECONE_METAPAGE_BLKNO 0
+#define PINECONE_BUFFER_HEAD_BLKNO 1
+
 typedef struct PineconeOptions
 {
 	int32		vl_len_;		/* varlena header (do not touch directly!) */
@@ -53,12 +58,7 @@ PineconeInit(void)
 }
 
 
-
-// setup guc for api key
-// void _PG_init(void);
-// variable
-
-IndexBuildResult *no_build(Relation heap, Relation index, IndexInfo *indexInfo)
+IndexBuildResult *pinecone_build(Relation heap, Relation index, IndexInfo *indexInfo)
 {
     cJSON *create_response;
     char *spec;
@@ -68,6 +68,14 @@ IndexBuildResult *no_build(Relation heap, Relation index, IndexInfo *indexInfo)
     cJSON *describe_index_response;
     PineconeOptions *opts = (PineconeOptions *) index->rd_options;
     IndexBuildResult *result = palloc(sizeof(IndexBuildResult));
+    // test using spi
+    // SPI_connect();
+    // SPI_execute("SELECT 1", false, 1);
+    // for (int i = 0; i < SPI_processed; i++)
+    // {
+        // elog(NOTICE, "row %d", i);
+    // }
+    // SPI_finish();
     // the user specified the column as vector(1536), we need to tell pinecone the dimensionality=1536
     dimensions = TupleDescAttr(index->rd_att, 0)->atttypmod;
     // create a pinecone_index_name like _pgvector_remote_{rd_id}
@@ -78,6 +86,8 @@ IndexBuildResult *no_build(Relation heap, Relation index, IndexInfo *indexInfo)
     // log the response host
     host = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(create_response, "host"));
     CreateMetaPage(index, dimensions, host, pinecone_index_name, MAIN_FORKNUM);
+    // create buffer
+    CreateBufferHead(index, MAIN_FORKNUM);
     // now we need to wait until the pinecone index is done initializing
     sleep(1); // sleep for 1 second to allow pinecone to register the index.
     while (true)
@@ -87,7 +97,7 @@ IndexBuildResult *no_build(Relation heap, Relation index, IndexInfo *indexInfo)
         {
             break;
         }
-        elog(NOTICE, "Waiting for index to be ready ... %s", cJSON_Print(describe_index_response));
+        elog(NOTICE, "Waiting for remote index to initialize...");
         sleep(1);
     }
     result->heap_tuples = 0;
@@ -96,13 +106,8 @@ IndexBuildResult *no_build(Relation heap, Relation index, IndexInfo *indexInfo)
 }
 void no_buildempty(Relation index){};
 
-#define PineconePageGetOpaque(page)	((PineconePageOpaque) PageGetSpecialPointer(page))
+#define PineconePageGetOpaque(page)	((PineconeBufferOpaque) PageGetSpecialPointer(page))
 #define PineconePageGetMeta(page)	((PineconeMetaPageData *) PageGetContents(page))
-typedef struct PineconePageOpaqueData
-{
-    uint16 flags;
-} PineconePageOpaqueData;
-typedef PineconePageOpaqueData *PineconePageOpaque;
 
 void CreateMetaPage(Relation index, int dimensions, char *host, char *pinecone_index_name, int forkNum)
 {
@@ -116,7 +121,7 @@ void CreateMetaPage(Relation index, int dimensions, char *host, char *pinecone_i
     // register and initialize the page
     state = GenericXLogStart(index);
     page = GenericXLogRegisterBuffer(state, buf, GENERIC_XLOG_FULL_IMAGE);
-    PageInit(page, BufferGetPageSize(buf), sizeof(PineconeMetaPageData)); // third arg is the sizeof the page's opaque data
+    PageInit(page, BufferGetPageSize(buf), 0); // third arg is the sizeof the page's opaque data
     metap = PineconePageGetMeta(page);
     metap->dimensions = dimensions;
     strcpy(metap->host, host);
@@ -126,6 +131,27 @@ void CreateMetaPage(Relation index, int dimensions, char *host, char *pinecone_i
     GenericXLogFinish(state);
     UnlockReleaseBuffer(buf);
 }
+
+void CreateBufferHead(Relation index, int forkNum)
+{
+    Buffer buf;
+    Page page; // a page is a block of memory, formatted as a page
+    GenericXLogState *state;
+    // create a new buffer
+    buf = ReadBufferExtended(index, forkNum, P_NEW, RBM_NORMAL, NULL);
+    LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE); // lock the buffer in exclusive mode meaning no other process can access it
+    // register and initialize the page
+    state = GenericXLogStart(index);
+    page = GenericXLogRegisterBuffer(state, buf, GENERIC_XLOG_FULL_IMAGE);
+    PageInit(page, BufferGetPageSize(buf), sizeof(PineconeBufferOpaqueData)); // third arg is the sizeof the page's opaque data
+    // initialize the opaque data
+    PineconePageGetOpaque(page)->nextblkno = InvalidBlockNumber;
+    // cleanup
+    GenericXLogFinish(state);
+    UnlockReleaseBuffer(buf);
+}
+
+
 PineconeMetaPageData ReadMetaPage(Relation index) {
     Buffer buf;
     Page page;
@@ -141,9 +167,6 @@ PineconeMetaPageData ReadMetaPage(Relation index) {
 
 void pinecone_buildempty(Relation index)
 {
-    // IndexInfo *indexInfo = BuildIndexInfo(index);
-	// BuildIndex(NULL, index, indexInfo, &buildstate, INIT_FORKNUM);
-    // CreateMetaPage(index, 5, 100, INIT_FORKNUM);
 }
 
 /*
@@ -197,8 +220,91 @@ bool pinecone_insert(Relation index, Datum *values, bool *isnull, ItemPointer he
     elog(NOTICE, "host: %s", pinecone_meta.host);
     elog(NOTICE, "api_key: %s", pinecone_api_key);
     pinecone_upsert_one(pinecone_api_key, pinecone_meta.host, json_vector);
+    // insert into the buffer refer to ivfflatinsert and the InsertTuple function in ivfinsert.c
+    InsertBufferTupleMemCtx(index, values, isnull, heap_tid, heap, checkUnique, indexInfo);
     return false;
 }
+
+void InsertBufferTupleMemCtx(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heapRel, IndexUniqueCheck checkUnique, IndexInfo *indexInfo)
+{
+    MemoryContext oldCtx;
+    MemoryContext insertCtx;
+    insertCtx = AllocSetContextCreate(CurrentMemoryContext,
+                                      "Pinecone insert temporary context",
+                                      ALLOCSET_DEFAULT_SIZES);
+    oldCtx = MemoryContextSwitchTo(insertCtx);
+    InsertBufferTuple(index, values, isnull, heap_tid, heapRel);
+    MemoryContextSwitchTo(oldCtx);
+    MemoryContextDelete(insertCtx); // delete the temporary context
+}
+
+void InsertBufferTuple(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heapRel)
+{
+    IndexTuple itup;
+    BlockNumber insertPage;
+    Size itemsz;
+    Buffer buf;
+    Page page;
+    GenericXLogState *state;
+    bool success;
+    // form tuple
+    itup = index_form_tuple(RelationGetDescr(index), values, isnull);
+    itup->t_tid = *heap_tid;
+    // find insert page
+    insertPage = PINECONE_BUFFER_HEAD_BLKNO;
+    // get the size of the tuple
+    itemsz = MAXALIGN(IndexTupleSize(itup));
+    elog(NOTICE, "itemsz: %d", (int) itemsz);
+    // look for the first page in the chain which has enough space to fit the tuple
+    while (true)
+    {
+        buf = ReadBuffer(index, insertPage);
+        LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+        state = GenericXLogStart(index);
+        page = GenericXLogRegisterBuffer(state, buf, 0); // register current state of the page
+        if (PageGetFreeSpace(page) >= itemsz) break;
+        insertPage = PineconePageGetOpaque(page)->nextblkno;
+        // if there is no next page, create a new page
+        if (BlockNumberIsValid(insertPage))
+        {
+            // Move to next page
+            GenericXLogAbort(state);
+            UnlockReleaseBuffer(buf);
+        }
+        else
+        {
+            // we hold onto the lock for now because we'll need to update the nextblkno
+            Buffer newbuf;
+            Page newpage;
+            // add a newpage
+            LockRelationForExtension(index, ExclusiveLock);
+            newbuf = ReadBufferExtended(index, MAIN_FORKNUM, P_NEW, RBM_NORMAL, NULL);
+            LockBuffer(newbuf, BUFFER_LOCK_EXCLUSIVE);
+            UnlockRelationForExtension(index, ExclusiveLock);
+            // init new page
+            newpage = GenericXLogRegisterBuffer(state, newbuf, GENERIC_XLOG_FULL_IMAGE);
+            PageInit(newpage, BufferGetPageSize(newbuf), sizeof(PineconeBufferOpaqueData));
+            PineconePageGetOpaque(newpage)->nextblkno = InvalidBlockNumber;
+            // update insert page
+            insertPage = BufferGetBlockNumber(newbuf);
+            // update previous buffer and commit
+            PineconePageGetOpaque(page)->nextblkno = insertPage;
+            GenericXLogFinish(state);
+            UnlockReleaseBuffer(buf);
+            // prepare new buffer
+            state = GenericXLogStart(index);
+            buf = newbuf;
+            page = GenericXLogRegisterBuffer(state, buf, 0);
+            break;
+        }
+    }
+    success = PageAddItem(page, (Item) itup, itemsz, InvalidOffsetNumber, false, false);
+    if (!success) elog(ERROR, "failed to add item to page");
+    GenericXLogFinish(state);
+    UnlockReleaseBuffer(buf);
+}
+
+
 
 IndexBulkDeleteResult *no_bulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
                                      IndexBulkDeleteCallback callback, void *callback_state)
@@ -287,12 +393,11 @@ pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, i
     // iterate thru the keys and build the filter
     for (int i = 0; i < nkeys; i++)
     {
-        elog(NOTICE, "key n: %d", i);
         cJSON *key_filter = cJSON_CreateObject();
         cJSON *condition = cJSON_CreateObject();
         cJSON *condition_value;
         FormData_pg_attribute* td = TupleDescAttr(scan->indexRelation->rd_att, keys[i].sk_attno - 1);
-        elog(NOTICE, "tuple desc %s", td->attname.data);
+        elog(NOTICE, "tuple attr %d desc %s", keys[i].sk_attno, td->attname.data);
         if (td->atttypid == BOOLOID)
         {
             condition_value = cJSON_CreateBool(DatumGetBool(keys[i].sk_argument));
@@ -385,7 +490,7 @@ Datum pineconehandler(PG_FUNCTION_ARGS)
     amroutine->amkeytype = InvalidOid;
 
     /* Interface functions */
-    amroutine->ambuild = no_build;
+    amroutine->ambuild = pinecone_build;
     amroutine->ambuildempty = pinecone_buildempty;
     amroutine->aminsert = pinecone_insert;
     amroutine->ambulkdelete = no_bulkdelete;
