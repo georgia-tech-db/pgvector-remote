@@ -128,10 +128,9 @@ void pinecone_upsert(const char *api_key, const char *index_host, cJSON *vectors
     curl_easy_setopt(hnd, CURLOPT_WRITEDATA, response_stream);
     curl_easy_setopt(hnd, CURLOPT_POSTFIELDS, body_str);
     ret = curl_easy_perform(hnd);
-    elog(NOTICE, "Response code: %d", ret);
     fflush(response_stream);
+    elog(NOTICE, "Response code: %d", ret);
     elog(NOTICE, "Response data: %s", response_data);
-    elog(NOTICE, "api_key: %s", api_key);
 }
 
 void pinecone_upsert_one(const char *api_key, const char *index_host, cJSON *vector) {

@@ -82,7 +82,7 @@ IndexBuildResult *pinecone_build(Relation heap, Relation index, IndexInfo *index
     snprintf(pinecone_index_name, 100, "pgvector-remote-index-oid-%d", index->rd_id);
     //
     spec = GET_STRING_RELOPTION(opts, spec);
-    create_response = create_index(pinecone_api_key, pinecone_index_name, dimensions, "cosine", spec);
+    create_response = create_index(pinecone_api_key, pinecone_index_name, dimensions, "euclidean", spec);
     // log the response host
     host = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(create_response, "host"));
     CreateMetaPage(index, dimensions, host, pinecone_index_name, MAIN_FORKNUM);
@@ -124,10 +124,43 @@ void CreateMetaPage(Relation index, int dimensions, char *host, char *pinecone_i
     PageInit(page, BufferGetPageSize(buf), 0); // third arg is the sizeof the page's opaque data
     metap = PineconePageGetMeta(page);
     metap->dimensions = dimensions;
+    metap->buffer_fullness = 0;
     strcpy(metap->host, host);
     strcpy(metap->pinecone_index_name, pinecone_index_name);
     ((PageHeader) page)->pd_lower = ((char *) metap - (char *) page) + sizeof(PineconeMetaPageData);
     // cleanup
+    GenericXLogFinish(state);
+    UnlockReleaseBuffer(buf);
+}
+
+void incrMetaPageBufferFullness(Relation index)
+{
+    Buffer buf;
+    Page page;
+    PineconeMetaPage metap;
+    GenericXLogState *state;
+    buf = ReadBuffer(index, PINECONE_METAPAGE_BLKNO);
+    LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+    state = GenericXLogStart(index);
+    page = GenericXLogRegisterBuffer(state, buf, 0);
+    metap = PineconePageGetMeta(page);
+    metap->buffer_fullness++;
+    GenericXLogFinish(state);
+    UnlockReleaseBuffer(buf);
+}
+
+void setMetaPageBufferFullnessZero(Relation index)
+{
+    Buffer buf;
+    Page page;
+    PineconeMetaPage metap;
+    GenericXLogState *state;
+    buf = ReadBuffer(index, PINECONE_METAPAGE_BLKNO);
+    LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+    state = GenericXLogStart(index);
+    page = GenericXLogRegisterBuffer(state, buf, 0);
+    metap = PineconePageGetMeta(page);
+    metap->buffer_fullness = 0;
     GenericXLogFinish(state);
     UnlockReleaseBuffer(buf);
 }
@@ -160,7 +193,6 @@ PineconeMetaPageData ReadMetaPage(Relation index) {
     LockBuffer(buf, BUFFER_LOCK_SHARE);
     page = BufferGetPage(buf);
     metap = PineconePageGetMeta(page);
-    elog(NOTICE, "dimensions: %d; host: %s", metap->dimensions, metap->host);
     UnlockReleaseBuffer(buf);
     return *metap;
 }
@@ -181,48 +213,142 @@ bool pinecone_insert(Relation index, Datum *values, bool *isnull, ItemPointer he
                      ,
                      IndexInfo *indexInfo)
 {
-    Vector *vector = DatumGetVector(values[0]);
-    cJSON *json_values;
-    cJSON *json_vector;
-    char vector_id[6 + 1]; // derive the vector_id from the heap_tid
-    cJSON *metadata;
     PineconeMetaPageData pinecone_meta;
+    cJSON *json_vectors;
+    // pinecone_upsert_one(pinecone_api_key, pinecone_meta.host, json_vector);
+    // insert into the buffer refer to ivfflatinsert and the InsertTuple function in ivfinsert.c
+    InsertBufferTupleMemCtx(index, values, isnull, heap_tid, heap, checkUnique, indexInfo);
+    incrMetaPageBufferFullness(index);
     pinecone_meta = ReadMetaPage(index);
-    metadata = cJSON_CreateObject();
+    elog(NOTICE, "Buffer fullness: %d", pinecone_meta.buffer_fullness);
+    // if the buffer is full, flush it to the remote index
+    if (pinecone_meta.buffer_fullness == 10) {
+        elog(NOTICE, "Buffer fullness = 2, flushing to remote index");
+        json_vectors = get_buffer_pinecone_vectors(index);
+        elog(NOTICE, "payload from get_buffer_pinecone_vectors: %s", cJSON_Print(json_vectors));
+        pinecone_upsert(pinecone_api_key, pinecone_meta.host, json_vectors);
+        elog(NOTICE, "Buffer flushed to remote index. Now clearing buffer");
+        clear_buffer(index);
+        setMetaPageBufferFullnessZero(index);
+
+    }
+    return false;
+}
+
+void clear_buffer(Relation index)
+{
+    Buffer buf;
+    Page page;
+    BlockNumber currentblkno = PINECONE_BUFFER_HEAD_BLKNO;
+    buf = ReadBuffer(index, currentblkno);
+    LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+    page = BufferGetPage(buf);
+    // iterate through the pages and use indexMultiDelete to delete all the tuples on each page
+    while (true)
+    {
+        // iterate through the tuples
+        int nitems = PageGetMaxOffsetNumber(page);
+        OffsetNumber *itemnos = palloc(sizeof(OffsetNumber) * nitems);
+        for (int i = 1; i <= nitems; i++) {
+            itemnos[i-1] = i;
+        }
+        elog(NOTICE, "deleting %d items", nitems);
+        PageIndexMultiDelete(page, itemnos, nitems); // todo this needs to be WALed
+        elog(NOTICE, "deleted %d items", nitems);
+        // get the next page
+        currentblkno = PineconePageGetOpaque(page)->nextblkno;
+        if (BlockNumberIsValid(currentblkno))
+        {
+            // release the current buffer
+            UnlockReleaseBuffer(buf);
+            // get the next buffer
+            buf = ReadBuffer(index, currentblkno);
+            LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+            page = BufferGetPage(buf);
+        }
+        else
+        {
+            break;
+        }
+    }
+    UnlockReleaseBuffer(buf);
+}
+
+cJSON* get_buffer_pinecone_vectors(Relation index)
+{
+    cJSON* json_vectors = cJSON_CreateArray();
+    Buffer buf;
+    Page page;
+    BlockNumber currentblkno = PINECONE_BUFFER_HEAD_BLKNO;
+    buf = ReadBuffer(index, currentblkno);
+    LockBuffer(buf, BUFFER_LOCK_SHARE);
+    page = BufferGetPage(buf);
+    // iterate through the pages
+    while (true)
+    {
+        // iterate through the tuples
+        for (int i = 1; i <= PageGetMaxOffsetNumber(page); i++)
+        {
+            IndexTuple itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, i));
+            cJSON *json_vector = tuple_get_pinecone_vector(index, itup);
+            cJSON_AddItemToArray(json_vectors, json_vector);
+        }
+        // get the next page
+        currentblkno = PineconePageGetOpaque(page)->nextblkno;
+        if (BlockNumberIsValid(currentblkno))
+        {
+            // release the current buffer
+            UnlockReleaseBuffer(buf);
+            // get the next buffer
+            buf = ReadBuffer(index, currentblkno);
+            LockBuffer(buf, BUFFER_LOCK_SHARE);
+            page = BufferGetPage(buf);
+        }
+        else
+        {
+            break;
+        }
+    }
+    UnlockReleaseBuffer(buf);
+    return json_vectors;
+}
+
+cJSON* tuple_get_pinecone_vector(Relation index, IndexTuple itup)
+{
+    Datum *itup_values = (Datum *) palloc(sizeof(Datum) * index->rd_att->natts);
+    bool *itup_isnull = (bool *) palloc(sizeof(bool) * index->rd_att->natts);
+    cJSON *json_vector = cJSON_CreateObject();
+    cJSON *metadata = cJSON_CreateObject();
+    char vector_id[6 + 1]; // derive the vector_id from the heap_tid
+    Vector *vector;
+    cJSON *json_values;
+    // get the values from the index tuple
+    index_deform_tuple(itup, index->rd_att, itup_values, itup_isnull); // set itup_values in place
+    vector = DatumGetVector(itup_values[0]);
+    json_values = cJSON_CreateFloatArray(vector->x, vector->dim);
+    // derive the vector_id from the heap_tid
+    snprintf(vector_id, sizeof(vector_id), "%02x%02x%02x", itup->t_tid.ip_blkid.bi_hi, itup->t_tid.ip_blkid.bi_lo, itup->t_tid.ip_posid);
+    // prepare metadata
     for (int i = 0; i < index->rd_att->natts; i++)
     {
         // use a macro to get the attribute datatype TupleDescAttr(index->rd_att, i)
         FormData_pg_attribute* td = TupleDescAttr(index->rd_att, i);
-        elog(NOTICE, "tuple desc %s", td->attname.data);
         if (td->atttypid == BOOLOID)
         {
-            elog(NOTICE, "bool: %d", DatumGetBool(values[i]));
-            cJSON_AddItemToObject(metadata, td->attname.data, cJSON_CreateBool(DatumGetBool(values[i])));
+            cJSON_AddItemToObject(metadata, td->attname.data, cJSON_CreateBool(DatumGetBool(itup_values[i])));
         } else if (td->atttypid == FLOAT8OID)
         {
-            elog(NOTICE, "float8: %f", DatumGetFloat8(values[i]));
-            cJSON_AddItemToObject(metadata, td->attname.data, cJSON_CreateNumber(DatumGetFloat8(values[i])));
+            cJSON_AddItemToObject(metadata, td->attname.data, cJSON_CreateNumber(DatumGetFloat8(itup_values[i])));
         } else if (td->atttypid == TEXTOID)
         {
-            elog(NOTICE, "text: %s", TextDatumGetCString(values[i]));
-            cJSON_AddItemToObject(metadata, td->attname.data, cJSON_CreateString(TextDatumGetCString(values[i])));
+            cJSON_AddItemToObject(metadata, td->attname.data, cJSON_CreateString(TextDatumGetCString(itup_values[i])));
         }
     }
-    // log the metadata
-    elog(NOTICE, "metadata: %s", cJSON_Print(metadata));
-    snprintf(vector_id, sizeof(vector_id), "%02x%02x%02x", heap_tid->ip_blkid.bi_hi, heap_tid->ip_blkid.bi_lo, heap_tid->ip_posid);
-    json_values = cJSON_CreateFloatArray(vector->x, vector->dim);
-    json_vector = cJSON_CreateObject();
+    // add to vector object
     cJSON_AddItemToObject(json_vector, "id", cJSON_CreateString(vector_id));
     cJSON_AddItemToObject(json_vector, "values", json_values);
     cJSON_AddItemToObject(json_vector, "metadata", metadata);
-    elog(NOTICE, "payload: %s", cJSON_Print(json_vector));
-    elog(NOTICE, "host: %s", pinecone_meta.host);
-    elog(NOTICE, "api_key: %s", pinecone_api_key);
-    pinecone_upsert_one(pinecone_api_key, pinecone_meta.host, json_vector);
-    // insert into the buffer refer to ivfflatinsert and the InsertTuple function in ivfinsert.c
-    InsertBufferTupleMemCtx(index, values, isnull, heap_tid, heap, checkUnique, indexInfo);
-    return false;
+    return json_vector;
 }
 
 void InsertBufferTupleMemCtx(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heapRel, IndexUniqueCheck checkUnique, IndexInfo *indexInfo)
@@ -254,7 +380,6 @@ void InsertBufferTuple(Relation index, Datum *values, bool *isnull, ItemPointer 
     insertPage = PINECONE_BUFFER_HEAD_BLKNO;
     // get the size of the tuple
     itemsz = MAXALIGN(IndexTupleSize(itup));
-    elog(NOTICE, "itemsz: %d", (int) itemsz);
     // look for the first page in the chain which has enough space to fit the tuple
     while (true)
     {
@@ -420,7 +545,7 @@ pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, i
 	// get the query vector
     vec = DatumGetVector(orderbys[0].sk_argument);
     query_vector_values = cJSON_CreateFloatArray(vec->x, vec->dim);
-    pinecone_response = pinecone_api_query_index(pinecone_api_key, pinecone_metadata.host, 3, query_vector_values, filter);
+    pinecone_response = pinecone_api_query_index(pinecone_api_key, pinecone_metadata.host, 10000, query_vector_values, filter);
     elog(NOTICE, "pinecone_response: %s", cJSON_Print(pinecone_response));
     // copy pinecone_response to scan opaque
     // response has a matches array, set opaque to the child of matches aka first match

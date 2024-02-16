@@ -16,6 +16,7 @@
 typedef struct PineconeMetaPageData
 {
     int dimensions;
+    int buffer_fullness;
     char host[100];
     char pinecone_index_name[60];
 } PineconeMetaPageData;
@@ -58,6 +59,11 @@ PGDLLEXPORT Datum pineconehandler(PG_FUNCTION_ARGS);
 // buffer
 void InsertBufferTupleMemCtx(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heapRel, IndexUniqueCheck checkUnique, IndexInfo *indexInfo);
 void InsertBufferTuple(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heapRel);
+void incrMetaPageBufferFullness(Relation index);
+void setMetaPageBufferFullnessZero(Relation index);
+cJSON* tuple_get_pinecone_vector(Relation index, IndexTuple itup);
+cJSON* get_buffer_pinecone_vectors(Relation index);
+void clear_buffer(Relation index);
 
 
 #endif /* PINECONE_INDEX_AM_H */
