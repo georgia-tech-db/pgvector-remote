@@ -1,0 +1,38 @@
+SET enable_seqscan = off;
+ALTER SYSTEM SET pinecone.api_key = '5b2c1031-ba58-4acc-a634-9f943d68822c';
+CREATE TABLE t (id BIGSERIAL PRIMARY KEY, val vector(3));
+CREATE INDEX i2 ON t USING pinecone (val vector_l2_ops);
+INSERT INTO t (val) VALUES ('[0,0,0]');
+SELECT * FROM t ORDER BY val <-> '[3,3,3]' LIMIT 1;
+   val   
+---------
+ [1,2,3]
+(1 row)
+
+INSERT INTO t (val) VALUES ('[1,2,3]'), ('[1,1,1]');
+SELECT pg_sleep(20);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT * FROM t ORDER BY val <-> '[3,3,3]' LIMIT 1;
+   val   
+---------
+ [1,2,3]
+(1 row)
+
+INSERT INTO t (val) VALUES ('[1,2,4]'), ('[1, 4, 3]');
+SELECT * FROM t ORDER BY val <-> '[3,3,3]' DESC LIMIT 1;
+   val   
+---------
+ [1,2,3]
+(1 row)
+
+SELECT COUNT(*) FROM (SELECT * FROM t ORDER BY val <=> '[0,0,0]') t2;
+ count 
+-------
+     5
+(1 row)
+
+DROP TABLE t;
