@@ -12,11 +12,16 @@
 #include "access/relscan.h"
 #include "storage/block.h"
 
+#define PINECONE_DEFAULT_BUFFER_THRESHOLD 10
+#define PINECONE_MIN_BUFFER_THRESHOLD 1
+#define PINECONE_MAX_BUFFER_THRESHOLD 100
+
 // structs
 typedef struct PineconeMetaPageData
 {
     int dimensions;
     int buffer_fullness;
+    int buffer_threshold;
     char host[100];
     char pinecone_index_name[60];
 } PineconeMetaPageData;
@@ -50,7 +55,7 @@ extern void no_endscan(IndexScanDesc scan);
 
 // void CreateMetaPage(Relation index, int dimensions, int lists, int forkNum)
 extern void pinecone_buildempty(Relation index);
-extern void CreateMetaPage(Relation index, int dimensions, char *host, char *pinecone_index_name, int forkNum);
+extern void CreateMetaPage(Relation index, int dimensions, char *host, char *pinecone_index_name, int buffer_threshold, int forkNum);
 extern void CreateBufferHead(Relation index, int forkNum);
 extern PineconeMetaPageData ReadMetaPage(Relation index);
 void		PineconeInit(void);
