@@ -28,6 +28,7 @@ typedef struct PineconeOptions
 {
 	int32		vl_len_;		/* varlena header (do not touch directly!) */
     int         spec; // spec is a string; this is its offset in the rd_options
+    int         buffer_threshold; // threshold for the buffer before flushing to remote vector store.
 }			PineconeOptions;
 
 char *pinecone_api_key = NULL;
@@ -42,6 +43,13 @@ PineconeInit(void)
                              "defa",
                             NULL,
                              AccessExclusiveLock);
+
+    add_int_reloption(pinecone_relopt_kind, "buffer_threshold",
+                        "Buffer Threshold value",
+                        PINECONE_DEFAULT_BUFFER_THRESHOLD,
+                        PINECONE_MIN_BUFFER_THRESHOLD,
+                        PINECONE_MAX_BUFFER_THRESHOLD,
+                        AccessExclusiveLock);
     // add_int_reloption(pinecone_relopt_kind, "spec", "Pinecone configuration",
                       // 0, 0, 10, AccessExclusiveLock);
     DefineCustomStringVariable("pinecone.api_key",
@@ -64,6 +72,7 @@ IndexBuildResult *pinecone_build(Relation heap, Relation index, IndexInfo *index
     char *spec;
     char *host;
     int dimensions;
+    int buffer_threshold;
     char *pinecone_index_name = (char *) palloc(100);
     cJSON *describe_index_response;
     PineconeOptions *opts = (PineconeOptions *) index->rd_options;
@@ -82,10 +91,11 @@ IndexBuildResult *pinecone_build(Relation heap, Relation index, IndexInfo *index
     snprintf(pinecone_index_name, 100, "pgvector-remote-index-oid-%d", index->rd_id);
     //
     spec = GET_STRING_RELOPTION(opts, spec);
+    buffer_threshold = opts->buffer_threshold;
     create_response = create_index(pinecone_api_key, pinecone_index_name, dimensions, "euclidean", spec);
     // log the response host
     host = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(create_response, "host"));
-    CreateMetaPage(index, dimensions, host, pinecone_index_name, MAIN_FORKNUM);
+    CreateMetaPage(index, dimensions, host, pinecone_index_name, buffer_threshold, MAIN_FORKNUM);
     // create buffer
     CreateBufferHead(index, MAIN_FORKNUM);
     // now we need to wait until the pinecone index is done initializing
@@ -109,7 +119,7 @@ void no_buildempty(Relation index){};
 #define PineconePageGetOpaque(page)	((PineconeBufferOpaque) PageGetSpecialPointer(page))
 #define PineconePageGetMeta(page)	((PineconeMetaPageData *) PageGetContents(page))
 
-void CreateMetaPage(Relation index, int dimensions, char *host, char *pinecone_index_name, int forkNum)
+void CreateMetaPage(Relation index, int dimensions, char *host, char *pinecone_index_name, int buffer_threshold, int forkNum)
 {
     Buffer buf;
     Page page; // a page is a block of memory, formatted as a page
@@ -125,6 +135,7 @@ void CreateMetaPage(Relation index, int dimensions, char *host, char *pinecone_i
     metap = PineconePageGetMeta(page);
     metap->dimensions = dimensions;
     metap->buffer_fullness = 0;
+    metap->buffer_threshold = buffer_threshold;
     strcpy(metap->host, host);
     strcpy(metap->pinecone_index_name, pinecone_index_name);
     ((PageHeader) page)->pd_lower = ((char *) metap - (char *) page) + sizeof(PineconeMetaPageData);
@@ -222,8 +233,8 @@ bool pinecone_insert(Relation index, Datum *values, bool *isnull, ItemPointer he
     pinecone_meta = ReadMetaPage(index);
     elog(NOTICE, "Buffer fullness: %d", pinecone_meta.buffer_fullness);
     // if the buffer is full, flush it to the remote index
-    if (pinecone_meta.buffer_fullness == 10) {
-        elog(NOTICE, "Buffer fullness = 2, flushing to remote index");
+    if (pinecone_meta.buffer_fullness == pinecone_meta.buffer_threshold) {
+        elog(NOTICE, "Buffer fullness = %d, flushing to remote index", pinecone_meta.buffer_fullness);
         json_vectors = get_buffer_pinecone_vectors(index);
         elog(NOTICE, "payload from get_buffer_pinecone_vectors: %s", cJSON_Print(json_vectors));
         pinecone_upsert(pinecone_api_key, pinecone_meta.host, json_vectors);
@@ -461,6 +472,7 @@ bytea * no_options(Datum reloptions, bool validate)
 {
 	static const relopt_parse_elt tab[] = {
 		{"spec", RELOPT_TYPE_STRING, offsetof(PineconeOptions, spec)},
+        {"buffer_threshold", RELOPT_TYPE_INT, offsetof(PineconeOptions, buffer_threshold)}
 	};
 	return (bytea *) build_reloptions(reloptions, validate,
 									  pinecone_relopt_kind,
