@@ -92,8 +92,7 @@ cJSON* pinecone_api_query_index(const char *api_key, const char *index_host, con
     cJSON_AddItemToObject(body, "topK", cJSON_CreateNumber(topK));
     cJSON_AddItemToObject(body, "vector", query_vector_values);
     cJSON_AddItemToObject(body, "filter", filter);
-    // for now set includeValues to true and includeMetadata to false
-    cJSON_AddItemToObject(body, "includeValues", cJSON_CreateTrue());
+    cJSON_AddItemToObject(body, "includeValues", cJSON_CreateFalse());
     cJSON_AddItemToObject(body, "includeMetadata", cJSON_CreateFalse());
     elog(NOTICE, "Querying index %s with payload: %s", index_host, cJSON_Print(body));
     elog(NOTICE, "api_key: %s", api_key);
