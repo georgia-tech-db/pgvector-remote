@@ -302,7 +302,8 @@ CREATE OPERATOR CLASS vector_cosine_ops
 
 CREATE OPERATOR CLASS vector_l2_ops
 	DEFAULT FOR TYPE vector USING pinecone AS
-	OPERATOR 1 <-> (vector, vector) FOR ORDER BY float_ops;
+	OPERATOR 1 <-> (vector, vector) FOR ORDER BY float_ops,
+	FUNCTION 1 vector_l2_squared_distance(vector, vector);
 
 -- dummy boolean opclass for pinecone
 CREATE OPERATOR CLASS bool_pinecone_ops

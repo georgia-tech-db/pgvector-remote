@@ -13,6 +13,28 @@
 #include "storage/block.h"
 
 // structs
+typedef struct PineconeScanOpaqueData
+{
+    int dimensions;
+    bool first;
+
+    // sorting
+    Tuplesortstate *sortstate;
+    TupleDesc tupdesc;
+    TupleTableSlot *slot; // TODO ??
+    bool isnull;
+
+    // support functions
+    FmgrInfo *procinfo;
+    Oid collation; // TODO ??
+
+    // results
+    cJSON* pinecone_results;
+
+} PineconeScanOpaqueData;
+typedef PineconeScanOpaqueData *PineconeScanOpaque;
+
+
 typedef struct PineconeMetaPageData
 {
     int dimensions;
@@ -42,7 +64,7 @@ extern IndexBulkDeleteResult *no_vacuumcleanup(IndexVacuumInfo *info, IndexBulkD
 extern void no_costestimate(PlannerInfo *root, IndexPath *path, double loop_count, Cost *indexStartupCost, Cost *indexTotalCost, Selectivity *indexSelectivity, double *indexCorrelation, double *indexPages);
 extern bytea * no_options(Datum reloptions, bool validate);
 extern bool no_validate(Oid opclassoid);
-extern IndexScanDesc default_beginscan(Relation index, int nkeys, int norderbys);
+extern IndexScanDesc pinecone_beginscan(Relation index, int nkeys, int norderbys);
 extern void pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int norderbys);
 extern bool pinecone_gettuple(IndexScanDesc scan, ScanDirection dir);
 extern void no_endscan(IndexScanDesc scan);

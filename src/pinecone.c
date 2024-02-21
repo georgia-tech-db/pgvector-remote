@@ -20,6 +20,9 @@
 #include "executor/spi.h"
 #include "utils/memutils.h"
 #include "storage/lmgr.h"
+#include "catalog/pg_operator_d.h"
+#include "catalog/pg_type_d.h"
+#include "lib/pairingheap.h"
 
 #define PINECONE_METAPAGE_BLKNO 0
 #define PINECONE_BUFFER_HEAD_BLKNO 1
@@ -222,8 +225,8 @@ bool pinecone_insert(Relation index, Datum *values, bool *isnull, ItemPointer he
     pinecone_meta = ReadMetaPage(index);
     elog(NOTICE, "Buffer fullness: %d", pinecone_meta.buffer_fullness);
     // if the buffer is full, flush it to the remote index
-    if (pinecone_meta.buffer_fullness == 10) {
-        elog(NOTICE, "Buffer fullness = 2, flushing to remote index");
+    if (pinecone_meta.buffer_fullness == 100) {
+        elog(NOTICE, "Buffer fullness = 10, flushing to remote index");
         json_vectors = get_buffer_pinecone_vectors(index);
         elog(NOTICE, "payload from get_buffer_pinecone_vectors: %s", cJSON_Print(json_vectors));
         pinecone_upsert(pinecone_api_key, pinecone_meta.host, json_vectors);
@@ -373,6 +376,15 @@ void InsertBufferTuple(Relation index, Datum *values, bool *isnull, ItemPointer 
     Page page;
     GenericXLogState *state;
     bool success;
+    // detoast the values
+    // for (int i = 0; i < index->rd_att->natts; i++)
+    // {
+        // if (isnull[i]) continue;
+        // if (TupleDescAttr(index->rd_att, i)->attlen == -1)
+        // {
+            // values[i] = PointerGetDatum(PG_DETOAST_DATUM(values[i]));
+        // }
+    // }
     // form tuple
     itup = index_form_tuple(RelationGetDescr(index), values, isnull);
     itup->t_tid = *heap_tid;
@@ -478,10 +490,33 @@ no_validate(Oid opclassoid)
  * Prepare for an index scan
  */
 IndexScanDesc
-default_beginscan(Relation index, int nkeys, int norderbys)
+pinecone_beginscan(Relation index, int nkeys, int norderbys)
 {
 	IndexScanDesc scan;
+    PineconeScanOpaque so;
+    AttrNumber attNums[] = {1}; // sort only on the first column
+	Oid			sortOperators[] = {Float8LessOperator};
+	Oid			sortCollations[] = {InvalidOid};
+	bool		nullsFirstFlags[] = {false};
 	scan = RelationGetIndexScan(index, nkeys, norderbys);
+    so = (PineconeScanOpaque) palloc(sizeof(PineconeScanOpaqueData));
+
+    // set support functions
+    so->procinfo = index_getprocinfo(index, 1, 1); // lookup the first support function in the opclass for the first attribute
+    so->collation = index->rd_indcollation[0]; // get the collation of the first attribute
+
+    // create tuple description for sorting
+    so->tupdesc = CreateTemplateTupleDesc(2);
+    TupleDescInitEntry(so->tupdesc, (AttrNumber) 1, "distance", FLOAT8OID, -1, 0);
+    TupleDescInitEntry(so->tupdesc, (AttrNumber) 2, "heaptid", TIDOID, -1, 0);
+
+    // prep sort
+    // TODO allocate 10MB for the sort (we should actually need a lot less)
+    so->sortstate = tuplesort_begin_heap(so->tupdesc, 1, attNums, sortOperators, sortCollations, nullsFirstFlags, 10000, NULL, false);
+    so->slot = MakeSingleTupleTableSlot(so->tupdesc, &TTSOpsMinimalTuple);
+    //
+    scan->opaque = so;
+    // log scan->opaque
     return scan;
 }
 
@@ -496,7 +531,12 @@ pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, i
 	cJSON *query_vector_values;
 	cJSON *pinecone_response;
 	cJSON *matches;
+    Datum query_datum; // query vector
     PineconeMetaPageData pinecone_metadata;
+    PineconeScanOpaque so = (PineconeScanOpaque) scan->opaque;
+    BlockNumber currentblkno = PINECONE_BUFFER_HEAD_BLKNO;
+    // double tuples = 0;
+    // TupleTableSlot *slot = MakeSingleTupleTableSlot(so->tupdesc, &TTSOpsMinimalTuple);
     // filter
     const char* pinecone_filter_operators[] = {"$lt", "$lte", "$eq", "$gte", "$gt", "$ne"};
     cJSON *filter;
@@ -543,14 +583,68 @@ pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, i
     elog(NOTICE, "filter: %s", cJSON_Print(filter));
 
 	// get the query vector
-    vec = DatumGetVector(orderbys[0].sk_argument);
+    query_datum = orderbys[0].sk_argument;
+    vec = DatumGetVector(query_datum);
     query_vector_values = cJSON_CreateFloatArray(vec->x, vec->dim);
     pinecone_response = pinecone_api_query_index(pinecone_api_key, pinecone_metadata.host, 10000, query_vector_values, filter);
     elog(NOTICE, "pinecone_response: %s", cJSON_Print(pinecone_response));
     // copy pinecone_response to scan opaque
     // response has a matches array, set opaque to the child of matches aka first match
     matches = cJSON_GetObjectItemCaseSensitive(pinecone_response, "matches");
-    scan->opaque = matches->child;
+    so->pinecone_results = matches->child;
+    
+    // TODO understand these
+    /* Count index scan for stats */
+    // pgstat_count_index_scan(scan->indexRelation);
+
+    /* Safety check */
+    if (scan->orderByData == NULL)
+        elog(ERROR, "cannot scan pinecone index without order");
+
+    /* Requires MVCC-compliant snapshot as not able to pin during sorting */
+    /* https://www.postgresql.org/docs/current/index-locking.html */
+    if (!IsMVCCSnapshot(scan->xs_snapshot))
+        elog(ERROR, "non-MVCC snapshots are not supported with pinecone");
+
+    // ADD BUFFER TO THE SORT AND PERFORM THE SORT
+    // TODO skip normlizaton for now
+    // TODO create the sortstate
+    while (BlockNumberIsValid(currentblkno)) {
+        Buffer buf;
+        Page page;
+        Offset maxoffno;
+        buf = ReadBuffer(scan->indexRelation, currentblkno); // todo bulkread access method
+        LockBuffer(buf, BUFFER_LOCK_SHARE);
+        page = BufferGetPage(buf);
+        maxoffno = PageGetMaxOffsetNumber(page);
+        for (OffsetNumber offno = FirstOffsetNumber; offno <= maxoffno; offno = OffsetNumberNext(offno)) {
+            IndexTuple itup;
+            Datum datum;
+            bool isnull;
+            ItemId itemid = PageGetItemId(page, offno);
+
+            itup = (IndexTuple) PageGetItem(page, itemid);
+            datum = index_getattr(itup, 1, scan->indexRelation->rd_att, &isnull);
+
+            // add the tuples
+            ExecClearTuple(so->slot);
+            so->slot->tts_values[0] = FunctionCall2Coll(so->procinfo, so->collation, datum, query_datum); // compute distance between entry and query
+            so->slot->tts_isnull[0] = false;
+            so->slot->tts_values[1] = PointerGetDatum(&itup->t_tid);
+            so->slot->tts_isnull[1] = false;
+            ExecStoreVirtualTuple(so->slot);
+
+            elog(NOTICE, "adding tuple to sortstate");
+            tuplesort_puttupleslot(so->sortstate, so->slot);
+            // log the number of tuples in the sortstate
+            // elog(NOTICE, "tuples in sortstate: %d", so->sortstate->memtupcount);
+        }
+
+        currentblkno = PineconePageGetOpaque(page)->nextblkno;
+        UnlockReleaseBuffer(buf);
+    }
+
+    tuplesort_performsort(so->sortstate);
 }
 
 /*
@@ -560,9 +654,28 @@ bool
 pinecone_gettuple(IndexScanDesc scan, ScanDirection dir)
 {
 	// interpret scan->opaque as a cJSON object
-	cJSON *match = (cJSON *) scan->opaque;
 	char *id_str;
 	ItemPointerData match_heaptid;
+    ItemPointer match_heaptid_pointer;
+    PineconeScanOpaque so = (PineconeScanOpaque) scan->opaque;
+    cJSON *match = so->pinecone_results;
+    if (tuplesort_gettupleslot(so->sortstate, true, false, so->slot, NULL)) {
+        elog(NOTICE, "a 2 ✓");
+        // show the first slot which is distance double
+        elog(NOTICE, "distance: %f", DatumGetFloat8(slot_getattr(so->slot, 1, false)));
+        elog(NOTICE, "a 3 ✓");
+        match_heaptid_pointer = (ItemPointer) DatumGetPointer(slot_getattr(so->slot, 2, false)); // TODO 
+        elog(NOTICE, "a 4 ✓");
+        match_heaptid = *match_heaptid_pointer;
+        scan->xs_heaptid = match_heaptid;
+        scan->xs_recheckorderby = false;
+        scan->xs_recheck = false;
+        return true;
+    }
+    return true;
+
+
+    // OLD PINECONE_GETTUPLE
 	if (match == NULL) {
 		return false;
 	}
@@ -574,7 +687,8 @@ pinecone_gettuple(IndexScanDesc scan, ScanDirection dir)
 	// ItemPointer heaptid;
 	// scan->xs_heaptid = ItemPointerFromJson(pinecone_response);
 	// NEXT
-	scan->opaque = match->next;
+    elog(NOTICE, "next match: %s", cJSON_Print(match));
+    so->pinecone_results = so->pinecone_results->next;
 	return true;
 }
 
@@ -591,7 +705,7 @@ Datum pineconehandler(PG_FUNCTION_ARGS)
     IndexAmRoutine *amroutine = makeNode(IndexAmRoutine);
 
     amroutine->amstrategies = 0;
-    amroutine->amsupport = 0; /* number of support functions */
+    amroutine->amsupport = 1; /* number of support functions */
 #if PG_VERSION_NUM >= 130000
     amroutine->amoptsprocnum = 0;
 #endif
@@ -631,7 +745,7 @@ Datum pineconehandler(PG_FUNCTION_ARGS)
 #if PG_VERSION_NUM >= 140000
     amroutine->amadjustmembers = NULL;
 #endif
-    amroutine->ambeginscan = default_beginscan;
+    amroutine->ambeginscan = pinecone_beginscan;
     amroutine->amrescan = pinecone_rescan;
     amroutine->amgettuple = pinecone_gettuple;
     amroutine->amgetbitmap = NULL; // an alternative to amgettuple that returns a bitmap of matching tuples
