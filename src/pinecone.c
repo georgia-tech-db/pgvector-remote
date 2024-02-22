@@ -31,6 +31,10 @@
 
 #define PINECONE_DEFAULT_BATCH_SIZE 100
 
+#if PG_VERSION_NUM < 150000
+#define MarkGUCPrefixReserved(x) EmitWarningsOnPlaceholders(x)
+#endif
+
 typedef struct PineconeOptions
 {
 	int32		vl_len_;		/* varlena header (do not touch directly!) */
