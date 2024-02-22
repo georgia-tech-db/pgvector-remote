@@ -29,6 +29,8 @@
 #define PINECONE_METAPAGE_BLKNO 0
 #define PINECONE_BUFFER_HEAD_BLKNO 1
 
+#define PINECONE_DEFAULT_BATCH_SIZE 100
+
 typedef struct PineconeOptions
 {
 	int32		vl_len_;		/* varlena header (do not touch directly!) */
@@ -245,8 +247,7 @@ bool pinecone_insert(Relation index, Datum *values, bool *isnull, ItemPointer he
     if (pinecone_meta.buffer_fullness == pinecone_meta.buffer_threshold) {
         elog(NOTICE, "Buffer fullness = %d, flushing to remote index", pinecone_meta.buffer_fullness);
         json_vectors = get_buffer_pinecone_vectors(index);
-        elog(NOTICE, "payload from get_buffer_pinecone_vectors: %s", cJSON_Print(json_vectors));
-        pinecone_bulk_upsert(pinecone_api_key, pinecone_meta.host, json_vectors, 2);
+        pinecone_bulk_upsert(pinecone_api_key, pinecone_meta.host, json_vectors, PINECONE_DEFAULT_BATCH_SIZE);
         elog(NOTICE, "Buffer flushed to remote index. Now clearing buffer");
         clear_buffer(index);
         setMetaPageBufferFullnessZero(index);

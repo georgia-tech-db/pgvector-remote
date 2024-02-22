@@ -12,9 +12,9 @@
 #include "access/relscan.h"
 #include "storage/block.h"
 
-#define PINECONE_DEFAULT_BUFFER_THRESHOLD 10
+#define PINECONE_DEFAULT_BUFFER_THRESHOLD 2000
 #define PINECONE_MIN_BUFFER_THRESHOLD 1
-#define PINECONE_MAX_BUFFER_THRESHOLD 100
+#define PINECONE_MAX_BUFFER_THRESHOLD 10000
 
 // structs
 typedef struct PineconeScanOpaqueData
