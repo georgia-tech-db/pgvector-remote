@@ -27,6 +27,7 @@ typedef struct PineconeScanOpaqueData
     TupleDesc tupdesc;
     TupleTableSlot *slot; // TODO ??
     bool isnull;
+    bool more_buffer_tuples;
 
     // support functions
     FmgrInfo *procinfo;

@@ -684,6 +684,9 @@ pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, i
     }
 
     tuplesort_performsort(so->sortstate);
+    
+    // get the first tuple from the sortstate
+    so->more_buffer_tuples = tuplesort_gettupleslot(so->sortstate, true, false, so->slot, NULL);
 }
 
 /*
@@ -695,44 +698,45 @@ pinecone_gettuple(IndexScanDesc scan, ScanDirection dir)
 	// interpret scan->opaque as a cJSON object
 	char *id_str;
 	ItemPointerData match_heaptid;
-    ItemPointer match_heaptid_pointer;
     PineconeScanOpaque so = (PineconeScanOpaque) scan->opaque;
     cJSON *match = so->pinecone_results;
-    if (tuplesort_gettupleslot(so->sortstate, true, false, so->slot, NULL)) {
-        bool isnull;
+    double pinecone_top_score;
+    double buffer_top_score;
+    bool isnull;
+
+    pinecone_top_score = (match != NULL) ? cJSON_GetNumberValue(cJSON_GetObjectItemCaseSensitive(match, "score")) : __DBL_MAX__;
+    buffer_top_score = (so->more_buffer_tuples) ? DatumGetFloat8(slot_getattr(so->slot, 1, &isnull)) : __DBL_MAX__;
+    // log (match == NULL) so->more_buffer_tuples and the scores
+    sleep(1);
+    elog(NOTICE, "match == NULL: %d, so->more_buffer_tuples: %d, pinecone_top_score: %f, buffer_top_score: %f", match == NULL, so->more_buffer_tuples, pinecone_top_score, buffer_top_score);
+
+    // merge the results from the buffer and the remote index
+    if (match == NULL && !so->more_buffer_tuples) {
+        return false;
+    }
+    else if (buffer_top_score < pinecone_top_score) {
         Datum datum;
-        elog(NOTICE, "a 2 ✓");
-        // show the first slot which is distance double
+        elog(NOTICE, "buffer_top_score: %f", buffer_top_score);
         datum = slot_getattr(so->slot, 2, &isnull);
-        if (isnull) elog(ERROR, "distance is null");
-        if (!isnull) elog(NOTICE, "distance: %f", DatumGetFloat8(datum));
-        elog(NOTICE, "a 3 ✓");
-        match_heaptid_pointer = (ItemPointer) DatumGetPointer(slot_getattr(so->slot, 2, &isnull)); // TODO 
-        elog(NOTICE, "a 4 ✓");
-        match_heaptid = *match_heaptid_pointer;
+        match_heaptid = *DatumGetItemPointer(datum);
         scan->xs_heaptid = match_heaptid;
         scan->xs_recheckorderby = false;
         scan->xs_recheck = true;
+        // get the next tuple from the sortstate
+        so->more_buffer_tuples = tuplesort_gettupleslot(so->sortstate, true, false, so->slot, NULL);
         return true;
     }
-    return false;
-
-
-    // OLD PINECONE_GETTUPLE
-	if (match == NULL) {
-		return false;
-	}
-	// get the id of the match // interpret the id as a string
-	id_str = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(match, "id"));
-	sscanf(id_str, "%02hx%02hx%02hx", &match_heaptid.ip_blkid.bi_hi, &match_heaptid.ip_blkid.bi_lo, &match_heaptid.ip_posid);
-	scan->xs_recheckorderby = false;
-	scan->xs_heaptid = match_heaptid;
-	// ItemPointer heaptid;
-	// scan->xs_heaptid = ItemPointerFromJson(pinecone_response);
-	// NEXT
-    elog(NOTICE, "next match: %s", cJSON_Print(match));
-    so->pinecone_results = so->pinecone_results->next;
-	return true;
+    else {
+        // get the id of the match // interpret the id as a string
+        elog(NOTICE, "match: %s", cJSON_Print(match));
+        id_str = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(match, "id"));
+        sscanf(id_str, "%02hx%02hx%02hx", &match_heaptid.ip_blkid.bi_hi, &match_heaptid.ip_blkid.bi_lo, &match_heaptid.ip_posid);
+        scan->xs_heaptid = match_heaptid;
+        scan->xs_recheckorderby = false;
+        // NEXT
+        so->pinecone_results = so->pinecone_results->next;
+        return true;
+    }
 }
 
 void no_endscan(IndexScanDesc scan) {};
