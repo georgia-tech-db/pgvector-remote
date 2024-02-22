@@ -176,7 +176,7 @@ CreateGraphPages(HnswBuildState * buildstate)
 		Size		etupSize;
 		Size		ntupSize;
 		Size		combinedSize;
-		void	   *valuePtr = HnswPtrAccess(base, element->value);
+		Pointer		valuePtr = HnswPtrAccess(base, element->value);
 
 		/* Update iterator */
 		iter = element->next;
@@ -601,6 +601,9 @@ BuildCallback(Relation index, CALLBACK_ITEM_POINTER, Datum *values,
 static void
 InitGraph(HnswGraph * graph, char *base, long memoryTotal)
 {
+	/* Initialize the lock tranche if needed */
+	HnswInitLockTranche();
+
 	HnswPtrStore(base, graph->head, (HnswElement) NULL);
 	HnswPtrStore(base, graph->entryPoint, (HnswElement) NULL);
 	graph->memoryUsed = 0;

@@ -868,9 +868,10 @@ vector_mul(PG_FUNCTION_ARGS)
 int
 vector_cmp_internal(Vector * a, Vector * b)
 {
-	CheckDims(a, b);
+	int			dim = Min(a->dim, b->dim);
 
-	for (int i = 0; i < a->dim; i++)
+	/* Check values before dimensions to be consistent with Postgres arrays */
+	for (int i = 0; i < dim; i++)
 	{
 		if (a->x[i] < b->x[i])
 			return -1;
@@ -878,6 +879,13 @@ vector_cmp_internal(Vector * a, Vector * b)
 		if (a->x[i] > b->x[i])
 			return 1;
 	}
+
+	if (a->dim < b->dim)
+		return -1;
+
+	if (a->dim > b->dim)
+		return 1;
+
 	return 0;
 }
 
@@ -890,6 +898,9 @@ vector_lt(PG_FUNCTION_ARGS)
 {
 	Vector	   *a = PG_GETARG_VECTOR_P(0);
 	Vector	   *b = PG_GETARG_VECTOR_P(1);
+
+	/* TODO Remove in 0.7.0 */
+	CheckDims(a, b);
 
 	PG_RETURN_BOOL(vector_cmp_internal(a, b) < 0);
 }
@@ -904,6 +915,9 @@ vector_le(PG_FUNCTION_ARGS)
 	Vector	   *a = PG_GETARG_VECTOR_P(0);
 	Vector	   *b = PG_GETARG_VECTOR_P(1);
 
+	/* TODO Remove in 0.7.0 */
+	CheckDims(a, b);
+
 	PG_RETURN_BOOL(vector_cmp_internal(a, b) <= 0);
 }
 
@@ -916,6 +930,9 @@ vector_eq(PG_FUNCTION_ARGS)
 {
 	Vector	   *a = PG_GETARG_VECTOR_P(0);
 	Vector	   *b = PG_GETARG_VECTOR_P(1);
+
+	/* TODO Remove in 0.7.0 */
+	CheckDims(a, b);
 
 	PG_RETURN_BOOL(vector_cmp_internal(a, b) == 0);
 }
@@ -930,6 +947,9 @@ vector_ne(PG_FUNCTION_ARGS)
 	Vector	   *a = PG_GETARG_VECTOR_P(0);
 	Vector	   *b = PG_GETARG_VECTOR_P(1);
 
+	/* TODO Remove in 0.7.0 */
+	CheckDims(a, b);
+
 	PG_RETURN_BOOL(vector_cmp_internal(a, b) != 0);
 }
 
@@ -943,6 +963,9 @@ vector_ge(PG_FUNCTION_ARGS)
 	Vector	   *a = PG_GETARG_VECTOR_P(0);
 	Vector	   *b = PG_GETARG_VECTOR_P(1);
 
+	/* TODO Remove in 0.7.0 */
+	CheckDims(a, b);
+
 	PG_RETURN_BOOL(vector_cmp_internal(a, b) >= 0);
 }
 
@@ -955,6 +978,9 @@ vector_gt(PG_FUNCTION_ARGS)
 {
 	Vector	   *a = PG_GETARG_VECTOR_P(0);
 	Vector	   *b = PG_GETARG_VECTOR_P(1);
+
+	/* TODO Remove in 0.7.0 */
+	CheckDims(a, b);
 
 	PG_RETURN_BOOL(vector_cmp_internal(a, b) > 0);
 }
