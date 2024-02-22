@@ -17,6 +17,28 @@
 #define PINECONE_MAX_BUFFER_THRESHOLD 100
 
 // structs
+typedef struct PineconeScanOpaqueData
+{
+    int dimensions;
+    bool first;
+
+    // sorting
+    Tuplesortstate *sortstate;
+    TupleDesc tupdesc;
+    TupleTableSlot *slot; // TODO ??
+    bool isnull;
+
+    // support functions
+    FmgrInfo *procinfo;
+    Oid collation; // TODO ??
+
+    // results
+    cJSON* pinecone_results;
+
+} PineconeScanOpaqueData;
+typedef PineconeScanOpaqueData *PineconeScanOpaque;
+
+
 typedef struct PineconeMetaPageData
 {
     int dimensions;
@@ -47,7 +69,7 @@ extern IndexBulkDeleteResult *no_vacuumcleanup(IndexVacuumInfo *info, IndexBulkD
 extern void no_costestimate(PlannerInfo *root, IndexPath *path, double loop_count, Cost *indexStartupCost, Cost *indexTotalCost, Selectivity *indexSelectivity, double *indexCorrelation, double *indexPages);
 extern bytea * no_options(Datum reloptions, bool validate);
 extern bool no_validate(Oid opclassoid);
-extern IndexScanDesc default_beginscan(Relation index, int nkeys, int norderbys);
+extern IndexScanDesc pinecone_beginscan(Relation index, int nkeys, int norderbys);
 extern void pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int norderbys);
 extern bool pinecone_gettuple(IndexScanDesc scan, ScanDirection dir);
 extern void no_endscan(IndexScanDesc scan);
@@ -66,9 +88,11 @@ void InsertBufferTupleMemCtx(Relation index, Datum *values, bool *isnull, ItemPo
 void InsertBufferTuple(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heapRel);
 void incrMetaPageBufferFullness(Relation index);
 void setMetaPageBufferFullnessZero(Relation index);
-cJSON* tuple_get_pinecone_vector(Relation index, IndexTuple itup);
 cJSON* get_buffer_pinecone_vectors(Relation index);
 void clear_buffer(Relation index);
 
+cJSON* index_tuple_get_pinecone_vector(Relation index, IndexTuple itup);
+cJSON* heap_tuple_get_pinecone_vector(Relation heap, HeapTuple htup);
+cJSON* tuple_get_pinecone_vector(TupleDesc tup_desc, Datum *values, bool *isnull, char *vector_id);
 
 #endif /* PINECONE_INDEX_AM_H */
