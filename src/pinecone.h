@@ -83,9 +83,11 @@ void InsertBufferTupleMemCtx(Relation index, Datum *values, bool *isnull, ItemPo
 void InsertBufferTuple(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heapRel);
 void incrMetaPageBufferFullness(Relation index);
 void setMetaPageBufferFullnessZero(Relation index);
-cJSON* tuple_get_pinecone_vector(Relation index, IndexTuple itup);
 cJSON* get_buffer_pinecone_vectors(Relation index);
 void clear_buffer(Relation index);
 
+cJSON* index_tuple_get_pinecone_vector(Relation index, IndexTuple itup);
+cJSON* heap_tuple_get_pinecone_vector(Relation heap, HeapTuple htup);
+cJSON* tuple_get_pinecone_vector(TupleDesc tup_desc, Datum *values, bool *isnull, char *vector_id);
 
 #endif /* PINECONE_INDEX_AM_H */

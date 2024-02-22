@@ -23,6 +23,8 @@
 #include "catalog/pg_operator_d.h"
 #include "catalog/pg_type_d.h"
 #include "lib/pairingheap.h"
+#include "access/heapam.h"
+#include "utils/rel.h"
 
 #define PINECONE_METAPAGE_BLKNO 0
 #define PINECONE_BUFFER_HEAD_BLKNO 1
@@ -71,15 +73,8 @@ IndexBuildResult *pinecone_build(Relation heap, Relation index, IndexInfo *index
     cJSON *describe_index_response;
     PineconeOptions *opts = (PineconeOptions *) index->rd_options;
     IndexBuildResult *result = palloc(sizeof(IndexBuildResult));
-    // test using spi
-    // SPI_connect();
-    // SPI_execute("SELECT 1", false, 1);
-    // for (int i = 0; i < SPI_processed; i++)
-    // {
-        // elog(NOTICE, "row %d", i);
-    // }
-    // SPI_finish();
-    // the user specified the column as vector(1536), we need to tell pinecone the dimensionality=1536
+    TableScanDesc heap_scan;
+    cJSON *json_vectors = cJSON_CreateArray();
     dimensions = TupleDescAttr(index->rd_att, 0)->atttypmod;
     // create a pinecone_index_name like _pgvector_remote_{rd_id}
     snprintf(pinecone_index_name, 100, "pgvector-remote-index-oid-%d", index->rd_id);
@@ -103,11 +98,22 @@ IndexBuildResult *pinecone_build(Relation heap, Relation index, IndexInfo *index
         elog(NOTICE, "Waiting for remote index to initialize...");
         sleep(1);
     }
-    result->heap_tuples = 0;
-    result->index_tuples = 0;
+    // iterate thru the heap
+    heap_scan = table_beginscan(heap, GetActiveSnapshot(), 0, NULL);
+    for (HeapTuple tuple = heap_getnext(heap_scan, ForwardScanDirection); tuple != NULL; tuple = heap_getnext(heap_scan, ForwardScanDirection))
+    {
+        cJSON *json_vector;
+        json_vector = heap_tuple_get_pinecone_vector(heap, tuple);
+        cJSON_AddItemToArray(json_vectors, json_vector);
+        result->heap_tuples++;
+        result->index_tuples++;
+    }
+    table_endscan(heap_scan);
+    elog(NOTICE, "BASE TABLE VECTORS: %s", cJSON_Print(json_vectors));
+    pinecone_bulk_upsert(pinecone_api_key, host, json_vectors, 2);
     return result;
 }
-void no_buildempty(Relation index){};
+void no_buildempty(Relation index){}; // for some reason this is never called even when the base table is empty
 
 #define PineconePageGetOpaque(page)	((PineconeBufferOpaque) PageGetSpecialPointer(page))
 #define PineconePageGetMeta(page)	((PineconeMetaPageData *) PageGetContents(page))
@@ -292,7 +298,7 @@ cJSON* get_buffer_pinecone_vectors(Relation index)
         for (int i = 1; i <= PageGetMaxOffsetNumber(page); i++)
         {
             IndexTuple itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, i));
-            cJSON *json_vector = tuple_get_pinecone_vector(index, itup);
+            cJSON *json_vector = index_tuple_get_pinecone_vector(index, itup);
             cJSON_AddItemToArray(json_vectors, json_vector);
         }
         // get the next page
@@ -315,35 +321,30 @@ cJSON* get_buffer_pinecone_vectors(Relation index)
     return json_vectors;
 }
 
-cJSON* tuple_get_pinecone_vector(Relation index, IndexTuple itup)
+cJSON* tuple_get_pinecone_vector(TupleDesc tup_desc, Datum *values, bool *isnull, char *vector_id)
 {
-    Datum *itup_values = (Datum *) palloc(sizeof(Datum) * index->rd_att->natts);
-    bool *itup_isnull = (bool *) palloc(sizeof(bool) * index->rd_att->natts);
     cJSON *json_vector = cJSON_CreateObject();
     cJSON *metadata = cJSON_CreateObject();
-    char vector_id[6 + 1]; // derive the vector_id from the heap_tid
     Vector *vector;
     cJSON *json_values;
-    // get the values from the index tuple
-    index_deform_tuple(itup, index->rd_att, itup_values, itup_isnull); // set itup_values in place
-    vector = DatumGetVector(itup_values[0]);
+    vector = DatumGetVector(values[0]);
     json_values = cJSON_CreateFloatArray(vector->x, vector->dim);
-    // derive the vector_id from the heap_tid
-    snprintf(vector_id, sizeof(vector_id), "%02x%02x%02x", itup->t_tid.ip_blkid.bi_hi, itup->t_tid.ip_blkid.bi_lo, itup->t_tid.ip_posid);
     // prepare metadata
-    for (int i = 0; i < index->rd_att->natts; i++)
+    for (int i = 0; i < tup_desc->natts; i++)
     {
         // use a macro to get the attribute datatype TupleDescAttr(index->rd_att, i)
-        FormData_pg_attribute* td = TupleDescAttr(index->rd_att, i);
+        FormData_pg_attribute* td = TupleDescAttr(tup_desc, i);
+        // log the name of the attribute
+        // log the type of the attribute
         if (td->atttypid == BOOLOID)
         {
-            cJSON_AddItemToObject(metadata, td->attname.data, cJSON_CreateBool(DatumGetBool(itup_values[i])));
+            cJSON_AddItemToObject(metadata, td->attname.data, cJSON_CreateBool(DatumGetBool(values[i])));
         } else if (td->atttypid == FLOAT8OID)
         {
-            cJSON_AddItemToObject(metadata, td->attname.data, cJSON_CreateNumber(DatumGetFloat8(itup_values[i])));
+            cJSON_AddItemToObject(metadata, td->attname.data, cJSON_CreateNumber(DatumGetFloat8(values[i])));
         } else if (td->atttypid == TEXTOID)
         {
-            cJSON_AddItemToObject(metadata, td->attname.data, cJSON_CreateString(TextDatumGetCString(itup_values[i])));
+            cJSON_AddItemToObject(metadata, td->attname.data, cJSON_CreateString(TextDatumGetCString(values[i])));
         }
     }
     // add to vector object
@@ -352,6 +353,29 @@ cJSON* tuple_get_pinecone_vector(Relation index, IndexTuple itup)
     cJSON_AddItemToObject(json_vector, "metadata", metadata);
     return json_vector;
 }
+
+cJSON* index_tuple_get_pinecone_vector(Relation index, IndexTuple itup) {
+    int natts = index->rd_att->natts;
+    Datum *itup_values = (Datum *) palloc(sizeof(Datum) * natts);
+    bool *itup_isnull = (bool *) palloc(sizeof(bool) * natts);
+    TupleDesc itup_desc = index->rd_att;
+    char vector_id[6 + 1]; // derive the vector_id from the heap_tid
+    index_deform_tuple(itup, itup_desc, itup_values, itup_isnull);
+    snprintf(vector_id, sizeof(vector_id), "%02x%02x%02x", itup->t_tid.ip_blkid.bi_hi, itup->t_tid.ip_blkid.bi_lo, itup->t_tid.ip_posid);
+    return tuple_get_pinecone_vector(itup_desc, itup_values, itup_isnull, vector_id);
+}
+
+cJSON* heap_tuple_get_pinecone_vector(Relation heap, HeapTuple htup) {
+    int natts = heap->rd_att->natts;
+    Datum *htup_values = (Datum *) palloc(sizeof(Datum) * natts);
+    bool *htup_isnull = (bool *) palloc(sizeof(bool) * natts);
+    TupleDesc htup_desc = heap->rd_att;
+    char vector_id[6 + 1]; // derive the vector_id from the heap_tid
+    heap_deform_tuple(htup, htup_desc, htup_values, htup_isnull);
+    snprintf(vector_id, sizeof(vector_id), "%02x%02x%02x", htup->t_self.ip_blkid.bi_hi, htup->t_self.ip_blkid.bi_lo, htup->t_self.ip_posid);
+    return tuple_get_pinecone_vector(htup_desc, htup_values, htup_isnull, vector_id);
+}
+
 
 void InsertBufferTupleMemCtx(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heapRel, IndexUniqueCheck checkUnique, IndexInfo *indexInfo)
 {
