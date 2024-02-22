@@ -225,15 +225,14 @@ bool pinecone_insert(Relation index, Datum *values, bool *isnull, ItemPointer he
     pinecone_meta = ReadMetaPage(index);
     elog(NOTICE, "Buffer fullness: %d", pinecone_meta.buffer_fullness);
     // if the buffer is full, flush it to the remote index
-    if (pinecone_meta.buffer_fullness == 100) {
+    if (pinecone_meta.buffer_fullness == 4) {
         elog(NOTICE, "Buffer fullness = 10, flushing to remote index");
         json_vectors = get_buffer_pinecone_vectors(index);
         elog(NOTICE, "payload from get_buffer_pinecone_vectors: %s", cJSON_Print(json_vectors));
-        pinecone_upsert(pinecone_api_key, pinecone_meta.host, json_vectors);
+        pinecone_bulk_upsert(pinecone_api_key, pinecone_meta.host, json_vectors, 2);
         elog(NOTICE, "Buffer flushed to remote index. Now clearing buffer");
         clear_buffer(index);
         setMetaPageBufferFullnessZero(index);
-
     }
     return false;
 }
@@ -535,8 +534,9 @@ pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, i
     PineconeMetaPageData pinecone_metadata;
     PineconeScanOpaque so = (PineconeScanOpaque) scan->opaque;
     BlockNumber currentblkno = PINECONE_BUFFER_HEAD_BLKNO;
+    TupleTableSlot *slot = MakeSingleTupleTableSlot(so->tupdesc, &TTSOpsVirtual);
+    TupleDesc tupdesc = RelationGetDescr(scan->indexRelation); // used for accessing
     // double tuples = 0;
-    // TupleTableSlot *slot = MakeSingleTupleTableSlot(so->tupdesc, &TTSOpsMinimalTuple);
     // filter
     const char* pinecone_filter_operators[] = {"$lt", "$lte", "$eq", "$gte", "$gt", "$ne"};
     cJSON *filter;
@@ -624,18 +624,20 @@ pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, i
             ItemId itemid = PageGetItemId(page, offno);
 
             itup = (IndexTuple) PageGetItem(page, itemid);
-            datum = index_getattr(itup, 1, scan->indexRelation->rd_att, &isnull);
+            datum = index_getattr(itup, 1, tupdesc, &isnull);
+            if (isnull) elog(ERROR, "distance is null");
+
 
             // add the tuples
-            ExecClearTuple(so->slot);
-            so->slot->tts_values[0] = FunctionCall2Coll(so->procinfo, so->collation, datum, query_datum); // compute distance between entry and query
-            so->slot->tts_isnull[0] = false;
-            so->slot->tts_values[1] = PointerGetDatum(&itup->t_tid);
-            so->slot->tts_isnull[1] = false;
-            ExecStoreVirtualTuple(so->slot);
+            ExecClearTuple(slot);
+            slot->tts_values[0] = FunctionCall2Coll(so->procinfo, so->collation, datum, query_datum); // compute distance between entry and query
+            slot->tts_isnull[0] = false;
+            slot->tts_values[1] = ItemPointerGetDatum(&itup->t_tid);
+            slot->tts_isnull[1] = false;
+            ExecStoreVirtualTuple(slot);
 
             elog(NOTICE, "adding tuple to sortstate");
-            tuplesort_puttupleslot(so->sortstate, so->slot);
+            tuplesort_puttupleslot(so->sortstate, slot);
             // log the number of tuples in the sortstate
             // elog(NOTICE, "tuples in sortstate: %d", so->sortstate->memtupcount);
         }
@@ -660,19 +662,23 @@ pinecone_gettuple(IndexScanDesc scan, ScanDirection dir)
     PineconeScanOpaque so = (PineconeScanOpaque) scan->opaque;
     cJSON *match = so->pinecone_results;
     if (tuplesort_gettupleslot(so->sortstate, true, false, so->slot, NULL)) {
+        bool isnull;
+        Datum datum;
         elog(NOTICE, "a 2 ✓");
         // show the first slot which is distance double
-        elog(NOTICE, "distance: %f", DatumGetFloat8(slot_getattr(so->slot, 1, false)));
+        datum = slot_getattr(so->slot, 2, &isnull);
+        if (isnull) elog(ERROR, "distance is null");
+        if (!isnull) elog(NOTICE, "distance: %f", DatumGetFloat8(datum));
         elog(NOTICE, "a 3 ✓");
-        match_heaptid_pointer = (ItemPointer) DatumGetPointer(slot_getattr(so->slot, 2, false)); // TODO 
+        match_heaptid_pointer = (ItemPointer) DatumGetPointer(slot_getattr(so->slot, 2, &isnull)); // TODO 
         elog(NOTICE, "a 4 ✓");
         match_heaptid = *match_heaptid_pointer;
         scan->xs_heaptid = match_heaptid;
         scan->xs_recheckorderby = false;
-        scan->xs_recheck = false;
+        scan->xs_recheck = true;
         return true;
     }
-    return true;
+    return false;
 
 
     // OLD PINECONE_GETTUPLE
