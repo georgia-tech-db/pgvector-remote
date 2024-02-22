@@ -32,7 +32,7 @@ cJSON* describe_index(const char *api_key, const char *index_name) {
     curl_easy_setopt(hnd, CURLOPT_WRITEDATA, response_stream);
     curl_easy_perform(hnd);
     fflush(response_stream);
-    elog(NOTICE, "Response data: %s", response_data);
+    elog(DEBUG1, "Response data: %s", response_data);
     response_json = cJSON_Parse(response_data);
     return response_json;
 }
@@ -51,7 +51,7 @@ cJSON* create_index(const char *api_key, const char *index_name, const int dimen
     FILE *response_stream;
     response_stream = fmemopen(response_data, sizeof(response_data), "w");
     // add fields to body
-    elog(NOTICE, "Creating index %s with dimension %d and metric %s", index_name, dimension, metric);
+    elog(DEBUG1, "Creating index %s with dimension %d and metric %s", index_name, dimension, metric);
     cJSON_AddItemToObject(body, "name", cJSON_CreateString(index_name));
     cJSON_AddItemToObject(body, "dimension", cJSON_CreateNumber(dimension));
     cJSON_AddItemToObject(body, "metric", cJSON_CreateString(metric));
@@ -60,7 +60,7 @@ cJSON* create_index(const char *api_key, const char *index_name, const int dimen
     cJSON_AddItemToObject(body, "spec", spec_json);
     // convert body to string
     body_str = cJSON_Print(body);
-    elog(NOTICE, "Body: %s", body_str);
+    elog(DEBUG1, "Body: %s", body_str);
     // set curl options
     set_curl_options(hnd, api_key, "https://api.pinecone.io/indexes", "POST");
     curl_easy_setopt(hnd, CURLOPT_POSTFIELDS, body_str);
@@ -68,8 +68,8 @@ cJSON* create_index(const char *api_key, const char *index_name, const int dimen
     ret = curl_easy_perform(hnd);
     fflush(response_stream);
     // check if http return code is 422
-    elog(NOTICE, "Response code: %d", ret);
-    elog(NOTICE, "Response data: %s", response_data);
+    elog(DEBUG1, "Response code: %d", ret);
+    elog(DEBUG1, "Response data: %s", response_data);
     // cleanup
     curl_easy_cleanup(hnd);
     fclose(response_stream);
@@ -94,15 +94,15 @@ cJSON* pinecone_api_query_index(const char *api_key, const char *index_host, con
     cJSON_AddItemToObject(body, "filter", filter);
     cJSON_AddItemToObject(body, "includeValues", cJSON_CreateFalse());
     cJSON_AddItemToObject(body, "includeMetadata", cJSON_CreateFalse());
-    elog(NOTICE, "Querying index %s with payload: %s", index_host, cJSON_Print(body));
+    elog(DEBUG1, "Querying index %s with payload: %s", index_host, cJSON_Print(body));
     set_curl_options(hnd, api_key, url, "POST");
     curl_easy_setopt(hnd, CURLOPT_WRITEDATA, stream);
     curl_easy_setopt(hnd, CURLOPT_POSTFIELDS, cJSON_Print(body));
     ret = curl_easy_perform(hnd);
     // flush stream
     fflush(stream);
-    elog(NOTICE, "Response code: %d", ret);
-    elog(NOTICE, "Response data: %s", response_buffer);
+    elog(DEBUG1, "Response code: %d", ret);
+    elog(DEBUG1, "Response data: %s", response_buffer);
     // print response_buffer
     return cJSON_Parse(response_buffer);
 }
@@ -127,7 +127,7 @@ void pinecone_bulk_upsert(const char *api_key, const char *index_host, cJSON *ve
         int numfds;
         mc = curl_multi_wait(multi_handle, NULL, 0, 8000, &numfds);
         if (mc != CURLM_OK) {
-            elog(NOTICE, "curl_multi_wait() failed, code %d.", mc);
+            elog(DEBUG1, "curl_multi_wait() failed, code %d.", mc);
             break;
         }
         curl_multi_perform(multi_handle, &running);
@@ -153,8 +153,8 @@ CURL* get_pinecone_upsert_handle(const char *api_key, const char *index_host, cJ
     return hnd;
     // ret = curl_easy_perform(hnd);
     // fflush(response_stream);
-    // elog(NOTICE, "Response code: %d", ret);
-    // elog(NOTICE, "Response data: %s", response_data);
+    // elog(DEBUG1, "Response code: %d", ret);
+    // elog(DEBUG1, "Response data: %s", response_data);
 }
 
 cJSON* batch_vectors(cJSON *vectors, int batch_size) {

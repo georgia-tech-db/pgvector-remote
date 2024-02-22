@@ -107,7 +107,7 @@ IndexBuildResult *pinecone_build(Relation heap, Relation index, IndexInfo *index
         {
             break;
         }
-        elog(NOTICE, "Waiting for remote index to initialize...");
+        elog(DEBUG1, "Waiting for remote index to initialize...");
         sleep(1);
     }
     // iterate thru the heap
@@ -121,8 +121,8 @@ IndexBuildResult *pinecone_build(Relation heap, Relation index, IndexInfo *index
         result->index_tuples++;
     }
     table_endscan(heap_scan);
-    elog(NOTICE, "BASE TABLE VECTORS: %s", cJSON_Print(json_vectors));
-    pinecone_bulk_upsert(pinecone_api_key, host, json_vectors, 2);
+    elog(DEBUG1, "BASE TABLE VECTORS: %s", cJSON_Print(json_vectors));
+    pinecone_bulk_upsert(pinecone_api_key, host, json_vectors, PINECONE_DEFAULT_BATCH_SIZE);
     return result;
 }
 void no_buildempty(Relation index){}; // for some reason this is never called even when the base table is empty
@@ -242,13 +242,13 @@ bool pinecone_insert(Relation index, Datum *values, bool *isnull, ItemPointer he
     InsertBufferTupleMemCtx(index, values, isnull, heap_tid, heap, checkUnique, indexInfo);
     incrMetaPageBufferFullness(index);
     pinecone_meta = ReadMetaPage(index);
-    elog(NOTICE, "Buffer fullness: %d", pinecone_meta.buffer_fullness);
+    elog(DEBUG1, "Buffer fullness: %d", pinecone_meta.buffer_fullness);
     // if the buffer is full, flush it to the remote index
     if (pinecone_meta.buffer_fullness == pinecone_meta.buffer_threshold) {
-        elog(NOTICE, "Buffer fullness = %d, flushing to remote index", pinecone_meta.buffer_fullness);
+        elog(DEBUG1, "Buffer fullness = %d, flushing to remote index", pinecone_meta.buffer_fullness);
         json_vectors = get_buffer_pinecone_vectors(index);
         pinecone_bulk_upsert(pinecone_api_key, pinecone_meta.host, json_vectors, PINECONE_DEFAULT_BATCH_SIZE);
-        elog(NOTICE, "Buffer flushed to remote index. Now clearing buffer");
+        elog(DEBUG1, "Buffer flushed to remote index. Now clearing buffer");
         clear_buffer(index);
         setMetaPageBufferFullnessZero(index);
     }
@@ -272,9 +272,9 @@ void clear_buffer(Relation index)
         for (int i = 1; i <= nitems; i++) {
             itemnos[i-1] = i;
         }
-        elog(NOTICE, "deleting %d items", nitems);
+        elog(DEBUG1, "deleting %d items", nitems);
         PageIndexMultiDelete(page, itemnos, nitems); // todo this needs to be WALed
-        elog(NOTICE, "deleted %d items", nitems);
+        elog(DEBUG1, "deleted %d items", nitems);
         // get the next page
         currentblkno = PineconePageGetOpaque(page)->nextblkno;
         if (BlockNumberIsValid(currentblkno))
@@ -496,7 +496,7 @@ no_costestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 					double *indexPages)
 {
     if (list_length(path->indexorderbycols) == 0 || linitial_int(path->indexorderbycols) != 0) {
-        elog(NOTICE, "Index must be ordered by the first column");
+        elog(DEBUG1, "Index must be ordered by the first column");
         *indexTotalCost = 1000000;
         return;
     }
@@ -579,7 +579,7 @@ pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, i
     cJSON *filter;
     cJSON *and_list;
     // log the metadata
-    elog(NOTICE, "nkeys: %d", nkeys);
+    elog(DEBUG1, "nkeys: %d", nkeys);
     pinecone_metadata = ReadMetaPage(scan->indexRelation);    
 
 
@@ -599,7 +599,7 @@ pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, i
         cJSON *condition = cJSON_CreateObject();
         cJSON *condition_value;
         FormData_pg_attribute* td = TupleDescAttr(scan->indexRelation->rd_att, keys[i].sk_attno - 1);
-        elog(NOTICE, "tuple attr %d desc %s", keys[i].sk_attno, td->attname.data);
+        elog(DEBUG1, "tuple attr %d desc %s", keys[i].sk_attno, td->attname.data);
         if (td->atttypid == BOOLOID)
         {
             condition_value = cJSON_CreateBool(DatumGetBool(keys[i].sk_argument));
@@ -613,18 +613,18 @@ pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, i
         // this only works if all datatypes use the same strategy naming convention.
         cJSON_AddItemToObject(condition, pinecone_filter_operators[keys[i].sk_strategy - 1], condition_value);
         cJSON_AddItemToObject(key_filter, td->attname.data, condition);
-        elog(NOTICE, "key_filter: %s", cJSON_Print(condition));
+        elog(DEBUG1, "key_filter: %s", cJSON_Print(condition));
         cJSON_AddItemToArray(and_list, key_filter);
     }
     cJSON_AddItemToObject(filter, "$and", and_list);
-    elog(NOTICE, "filter: %s", cJSON_Print(filter));
+    elog(DEBUG1, "filter: %s", cJSON_Print(filter));
 
 	// get the query vector
     query_datum = orderbys[0].sk_argument;
     vec = DatumGetVector(query_datum);
     query_vector_values = cJSON_CreateFloatArray(vec->x, vec->dim);
     pinecone_response = pinecone_api_query_index(pinecone_api_key, pinecone_metadata.host, 10000, query_vector_values, filter);
-    elog(NOTICE, "pinecone_response: %s", cJSON_Print(pinecone_response));
+    elog(DEBUG1, "pinecone_response: %s", cJSON_Print(pinecone_response));
     // copy pinecone_response to scan opaque
     // response has a matches array, set opaque to the child of matches aka first match
     matches = cJSON_GetObjectItemCaseSensitive(pinecone_response, "matches");
@@ -669,14 +669,14 @@ pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, i
             ExecClearTuple(slot);
             slot->tts_values[0] = FunctionCall2Coll(so->procinfo, so->collation, datum, query_datum); // compute distance between entry and query
             slot->tts_isnull[0] = false;
-            slot->tts_values[1] = ItemPointerGetDatum(&itup->t_tid);
+            slot->tts_values[1] = PointerGetDatum(&itup->t_tid);
             slot->tts_isnull[1] = false;
             ExecStoreVirtualTuple(slot);
 
-            elog(NOTICE, "adding tuple to sortstate");
+            elog(DEBUG1, "adding tuple to sortstate");
             tuplesort_puttupleslot(so->sortstate, slot);
             // log the number of tuples in the sortstate
-            // elog(NOTICE, "tuples in sortstate: %d", so->sortstate->memtupcount);
+            // elog(DEBUG1, "tuples in sortstate: %d", so->sortstate->memtupcount);
         }
 
         currentblkno = PineconePageGetOpaque(page)->nextblkno;
@@ -715,7 +715,7 @@ pinecone_gettuple(IndexScanDesc scan, ScanDirection dir)
     else if (buffer_top_score < pinecone_top_score) {
         Datum datum;
         datum = slot_getattr(so->slot, 2, &isnull);
-        match_heaptid = *DatumGetItemPointer(datum);
+        match_heaptid = *((ItemPointer) DatumGetPointer(datum));
         scan->xs_heaptid = match_heaptid;
         scan->xs_recheckorderby = false;
         scan->xs_recheck = true;
