@@ -707,8 +707,6 @@ pinecone_gettuple(IndexScanDesc scan, ScanDirection dir)
     pinecone_top_score = (match != NULL) ? cJSON_GetNumberValue(cJSON_GetObjectItemCaseSensitive(match, "score")) : __DBL_MAX__;
     buffer_top_score = (so->more_buffer_tuples) ? DatumGetFloat8(slot_getattr(so->slot, 1, &isnull)) : __DBL_MAX__;
     // log (match == NULL) so->more_buffer_tuples and the scores
-    sleep(1);
-    elog(NOTICE, "match == NULL: %d, so->more_buffer_tuples: %d, pinecone_top_score: %f, buffer_top_score: %f", match == NULL, so->more_buffer_tuples, pinecone_top_score, buffer_top_score);
 
     // merge the results from the buffer and the remote index
     if (match == NULL && !so->more_buffer_tuples) {
@@ -716,7 +714,6 @@ pinecone_gettuple(IndexScanDesc scan, ScanDirection dir)
     }
     else if (buffer_top_score < pinecone_top_score) {
         Datum datum;
-        elog(NOTICE, "buffer_top_score: %f", buffer_top_score);
         datum = slot_getattr(so->slot, 2, &isnull);
         match_heaptid = *DatumGetItemPointer(datum);
         scan->xs_heaptid = match_heaptid;
@@ -728,7 +725,6 @@ pinecone_gettuple(IndexScanDesc scan, ScanDirection dir)
     }
     else {
         // get the id of the match // interpret the id as a string
-        elog(NOTICE, "match: %s", cJSON_Print(match));
         id_str = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(match, "id"));
         sscanf(id_str, "%02hx%02hx%02hx", &match_heaptid.ip_blkid.bi_hi, &match_heaptid.ip_blkid.bi_lo, &match_heaptid.ip_posid);
         scan->xs_heaptid = match_heaptid;
