@@ -395,6 +395,14 @@ cJSON* tuple_get_pinecone_vector(TupleDesc tup_desc, Datum *values, bool *isnull
     Vector *vector;
     cJSON *json_values;
     vector = DatumGetVector(values[0]);
+    if (vector_eq_zero_internal(vector))
+    {
+        // tell the user that the vector is an invalid datavalue because it contains a zero vector
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("Invalid vector: zero vector"),
+                 errhint("Pinecone dense vectors cannot be zero in all dimensions")));
+    }
     json_values = cJSON_CreateFloatArray(vector->x, vector->dim);
     // prepare metadata
     for (int i = 0; i < tup_desc->natts; i++)
