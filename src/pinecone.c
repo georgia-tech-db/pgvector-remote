@@ -76,6 +76,29 @@ PineconeInit(void)
     MarkGUCPrefixReserved("pinecone");
 }
 
+typedef struct PineconeBuildState
+{
+    int64 indtuples; // total number of tuples indexed
+    cJSON *json_vectors; // array of json vectors
+} PineconeBuildState;
+
+
+static void
+pinecone_build_callback(Relation index, ItemPointer tid, Datum *values, bool *isnull, bool tupleIsAlive, void *state)
+{
+    PineconeBuildState *buildstate = (PineconeBuildState *) state;
+    TupleDesc itup_desc = index->rd_att;
+    cJSON *json_vector;
+    char vector_id[6 + 1]; // derive the vector_id from the heap_tid
+    // they have already deformed the heap tuple and extracted the values I want for me.
+    snprintf(vector_id, sizeof(vector_id), "%02x%02x%02x", tid->ip_blkid.bi_hi, tid->ip_blkid.bi_lo, tid->ip_posid);
+    elog(DEBUG1, "vector_id: %s", vector_id);
+    json_vector = tuple_get_pinecone_vector(itup_desc, values, isnull, vector_id);
+    elog(DEBUG1, "json_vector: %s", cJSON_Print(json_vector));
+    cJSON_AddItemToArray(buildstate->json_vectors, json_vector);
+    buildstate->indtuples++;
+}
+
 
 IndexBuildResult *pinecone_build(Relation heap, Relation index, IndexInfo *indexInfo)
 {
@@ -84,12 +107,12 @@ IndexBuildResult *pinecone_build(Relation heap, Relation index, IndexInfo *index
     char *host;
     int dimensions;
     int buffer_threshold;
+    int reltuples;
     char *pinecone_index_name = (char *) palloc(100);
     cJSON *describe_index_response;
     PineconeOptions *opts = (PineconeOptions *) index->rd_options;
     IndexBuildResult *result = palloc(sizeof(IndexBuildResult));
-    TableScanDesc heap_scan;
-    cJSON *json_vectors = cJSON_CreateArray();
+    PineconeBuildState buildstate;
     dimensions = TupleDescAttr(index->rd_att, 0)->atttypmod;
     // create a pinecone_index_name like _pgvector_remote_{rd_id}
     snprintf(pinecone_index_name, 100, "pgvector-remote-index-oid-%d", index->rd_id);
@@ -114,19 +137,18 @@ IndexBuildResult *pinecone_build(Relation heap, Relation index, IndexInfo *index
         elog(DEBUG1, "Waiting for remote index to initialize...");
         sleep(1);
     }
-    // iterate thru the heap
-    heap_scan = table_beginscan(heap, GetActiveSnapshot(), 0, NULL);
-    for (HeapTuple tuple = heap_getnext(heap_scan, ForwardScanDirection); tuple != NULL; tuple = heap_getnext(heap_scan, ForwardScanDirection))
-    {
-        cJSON *json_vector;
-        json_vector = heap_tuple_get_pinecone_vector(heap, tuple);
-        cJSON_AddItemToArray(json_vectors, json_vector);
-        result->heap_tuples++;
-        result->index_tuples++;
-    }
-    table_endscan(heap_scan);
-    elog(DEBUG1, "BASE TABLE VECTORS: %s", cJSON_Print(json_vectors));
-    pinecone_bulk_upsert(pinecone_api_key, host, json_vectors, PINECONE_DEFAULT_BATCH_SIZE);
+
+    // initialize the buildstate
+    buildstate.indtuples = 0;
+    buildstate.json_vectors = cJSON_CreateArray();
+
+    reltuples = table_index_build_scan(heap, index, indexInfo, true, true, pinecone_build_callback, (void *) &buildstate, NULL);
+
+    elog(DEBUG1, "BASE TABLE VECTORS: %s", cJSON_Print(buildstate.json_vectors));
+    pinecone_bulk_upsert(pinecone_api_key, host, buildstate.json_vectors, PINECONE_DEFAULT_BATCH_SIZE);
+    // stats
+    result->heap_tuples = reltuples;
+    result->index_tuples = buildstate.indtuples;
     return result;
 }
 void no_buildempty(Relation index){}; // for some reason this is never called even when the base table is empty
