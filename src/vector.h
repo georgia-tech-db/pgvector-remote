@@ -8,6 +8,17 @@
 #define PG_GETARG_VECTOR_P(x)	DatumGetVector(PG_GETARG_DATUM(x))
 #define PG_RETURN_VECTOR_P(x)	PG_RETURN_POINTER(x)
 
+ 
+typedef enum VectorMetric
+{
+	INVALID_METRIC,
+	EUCLIDEAN_METRIC,
+	COSINE_METRIC,
+	INNER_PRODUCT_METRIC,
+	VECTOR_METRIC_COUNT
+} VectorMetric;
+
+
 typedef struct Vector
 {
 	int32		vl_len_;		/* varlena header (do not touch directly!) */

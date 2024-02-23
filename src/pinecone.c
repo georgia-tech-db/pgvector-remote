@@ -35,6 +35,13 @@
 #define MarkGUCPrefixReserved(x) EmitWarningsOnPlaceholders(x)
 #endif
 
+const char* vector_metric_to_pinecone_metric[VECTOR_METRIC_COUNT] = {
+    "",
+    "euclidean",
+    "cosine",
+    "dotproduct"
+};
+
 typedef struct PineconeOptions
 {
 	int32		vl_len_;		/* varlena header (do not touch directly!) */
@@ -73,16 +80,18 @@ PineconeInit(void)
     MarkGUCPrefixReserved("pinecone");
 }
 
-static char*
-get_opclass_pinecone_metric(Relation index)
+VectorMetric
+get_opclass_metric(Relation index)
 {
     FmgrInfo *procinfo;
     Oid collation;
     Datum datum;
+    VectorMetric metric;
     procinfo = index_getprocinfo(index, 1, 2); // lookup the second support function in the opclass for the first attribute
     collation = index->rd_indcollation[0]; // get the collation of the first attribute
     datum = FunctionCall0Coll(procinfo, collation); // call the support function
-    return DatumGetCString(datum);
+    metric = (VectorMetric) DatumGetInt32(datum);
+    return metric;
 }
 
 
@@ -123,27 +132,15 @@ IndexBuildResult *pinecone_build(Relation heap, Relation index, IndexInfo *index
     PineconeOptions *opts = (PineconeOptions *) index->rd_options;
     IndexBuildResult *result = palloc(sizeof(IndexBuildResult));
     PineconeBuildState buildstate;
-    char *metric;
-    char *opclass_metric;
+    VectorMetric metric = get_opclass_metric(index);
+    const char *pinecone_metric_name = vector_metric_to_pinecone_metric[metric];
     dimensions = TupleDescAttr(index->rd_att, 0)->atttypmod;
-    // validate pinecone metric
-    metric = GET_STRING_RELOPTION(opts, metric);
-    opclass_metric = get_opclass_pinecone_metric(index);
-    if (strcmp(metric, opclass_metric) != 0)
-    {
-        // abort the current transaction
-        ereport(ERROR,
-                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                 errmsg("Invalid pinecone metric %s for this opclass.", metric),
-                 errhint("Metric should be %s", opclass_metric)));
-    }
-
     // create a pinecone_index_name like _pgvector_remote_{rd_id}
     snprintf(pinecone_index_name, 100, "pgvector-remote-index-oid-%d", index->rd_id);
     //
     spec = GET_STRING_RELOPTION(opts, spec);
     buffer_threshold = opts->buffer_threshold;
-    create_response = create_index(pinecone_api_key, pinecone_index_name, dimensions, metric, spec);
+    create_response = create_index(pinecone_api_key, pinecone_index_name, dimensions, pinecone_metric_name, spec);
     // log the response host
     host = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(create_response, "host"));
     CreateMetaPage(index, dimensions, host, pinecone_index_name, buffer_threshold, metric, MAIN_FORKNUM);
@@ -179,7 +176,7 @@ void no_buildempty(Relation index){}; // for some reason this is never called ev
 #define PineconePageGetOpaque(page)	((PineconeBufferOpaque) PageGetSpecialPointer(page))
 #define PineconePageGetMeta(page)	((PineconeMetaPageData *) PageGetContents(page))
 
-void CreateMetaPage(Relation index, int dimensions, char *host, char *pinecone_index_name, int buffer_threshold, char *metric, int forkNum)
+void CreateMetaPage(Relation index, int dimensions, char *host, char *pinecone_index_name, int buffer_threshold, VectorMetric metric, int forkNum)
 {
     Buffer buf;
     Page page; // a page is a block of memory, formatted as a page
@@ -196,18 +193,8 @@ void CreateMetaPage(Relation index, int dimensions, char *host, char *pinecone_i
     metap->dimensions = dimensions;
     metap->buffer_fullness = 0;
     metap->buffer_threshold = buffer_threshold;
-    if (strcmp(metric, "euclidean") == 0)
-    {
-        metap->metric = L2;
-    } else if (strcmp(metric, "cosine") == 0)
-    {
-        metap->metric = COSINE;
-    } else if (strcmp(metric, "dotproduct") == 0)
-    {
-        metap->metric = INNER;
-    }
+    metap->metric = metric;
     strcpy(metap->host, host);
-    strcpy(metap->pinecone_index_name, pinecone_index_name);
     ((PageHeader) page)->pd_lower = ((char *) metap - (char *) page) + sizeof(PineconeMetaPageData);
     // cleanup
     GenericXLogFinish(state);
@@ -791,15 +778,15 @@ pinecone_gettuple(IndexScanDesc scan, ScanDirection dir)
     } else {
         switch (so->metric)
         {
-        case L2:
+        case EUCLIDEAN_METRIC:
             // pinecone returns the square of the euclidean distance, which is what we want
             pinecone_best_dist = cJSON_GetNumberValue(cJSON_GetObjectItemCaseSensitive(match, "score"));
             break;
-        case COSINE:
+        case COSINE_METRIC:
             // pinecone returns the cosine similarity, but we want "cosine distance" which is 1 - cosine similarity
             pinecone_best_dist = 1 - cJSON_GetNumberValue(cJSON_GetObjectItemCaseSensitive(match, "score"));
             break;
-        case INNER:
+        case INNER_PRODUCT_METRIC:
             // pinecone returns the dot product, but we want "dot product distance" which is - dot product
             pinecone_best_dist = - cJSON_GetNumberValue(cJSON_GetObjectItemCaseSensitive(match, "score"));
             break;

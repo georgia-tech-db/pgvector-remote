@@ -16,20 +16,12 @@
 #define PINECONE_MIN_BUFFER_THRESHOLD 1
 #define PINECONE_MAX_BUFFER_THRESHOLD 10000
 
-// metric enum
-typedef enum PineconeMetric
-{
-    INVALID,
-    L2,
-    COSINE,
-    INNER
-} PineconeMetric;
 
 // structs
 typedef struct PineconeScanOpaqueData
 {
     int dimensions;
-    PineconeMetric metric;
+    VectorMetric metric;
     bool first;
 
     // sorting
@@ -49,6 +41,7 @@ typedef struct PineconeScanOpaqueData
 } PineconeScanOpaqueData;
 typedef PineconeScanOpaqueData *PineconeScanOpaque;
 
+extern const char* vector_metric_to_pinecone_metric[VECTOR_METRIC_COUNT];
 
 typedef struct PineconeMetaPageData
 {
@@ -57,7 +50,7 @@ typedef struct PineconeMetaPageData
     int buffer_threshold;
     char host[100];
     char pinecone_index_name[60];
-    PineconeMetric metric;
+    VectorMetric metric;
 } PineconeMetaPageData;
 typedef PineconeMetaPageData *PineconeMetaPage;
 
@@ -89,7 +82,7 @@ extern void no_endscan(IndexScanDesc scan);
 
 // void CreateMetaPage(Relation index, int dimensions, int lists, int forkNum)
 extern void pinecone_buildempty(Relation index);
-extern void CreateMetaPage(Relation index, int dimensions, char *host, char *pinecone_index_name, int buffer_threshold, char* metric, int forkNum);
+extern void CreateMetaPage(Relation index, int dimensions, char *host, char *pinecone_index_name, int buffer_threshold, VectorMetric metric, int forkNum);
 extern void CreateBufferHead(Relation index, int forkNum);
 extern PineconeMetaPageData ReadMetaPage(Relation index);
 void		PineconeInit(void);
@@ -107,4 +100,5 @@ cJSON* index_tuple_get_pinecone_vector(Relation index, IndexTuple itup);
 cJSON* heap_tuple_get_pinecone_vector(Relation heap, HeapTuple htup);
 cJSON* tuple_get_pinecone_vector(TupleDesc tup_desc, Datum *values, bool *isnull, char *vector_id);
 
+VectorMetric get_opclass_metric(Relation index);
 #endif /* PINECONE_INDEX_AM_H */
