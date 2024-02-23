@@ -596,6 +596,18 @@ bytea * pinecone_options(Datum reloptions, bool validate)
                          errhint("Metric must be one of 'euclidean', 'cosine', 'dotproduct'")));
             }
         }
+        // check that spec is a valid json
+        if (opts && opts->spec) {
+            char* spec = GET_STRING_RELOPTION(opts, spec);
+            cJSON *spec_json = cJSON_Parse(spec);
+            if (spec_json == NULL)
+            {
+                ereport(ERROR,
+                        (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                         errmsg("Invalid spec: %s", spec),
+                         errhint("Spec must be a valid JSON object e.g.'{\"serverless\":{\"cloud\":\"aws\",\"region\":\"us-west-2\"}}'")));
+            }
+        }
     }
 	return (bytea *) opts;
 }
