@@ -58,7 +58,7 @@ PineconeInit(void)
     pinecone_relopt_kind = add_reloption_kind();
     add_string_reloption(pinecone_relopt_kind, "spec",
                             "Specification of the Pinecone Index. Refer to https://docs.pinecone.io/reference/create_index",
-                             "defa",
+                            "",
                             NULL,
                              AccessExclusiveLock);
     add_int_reloption(pinecone_relopt_kind, "buffer_threshold",
@@ -574,16 +574,15 @@ bytea * pinecone_options(Datum reloptions, bool validate)
                                       tab, lengthof(tab));
     if (validate)
     {
-        // check that spec is a valid json
         if (opts && opts->spec) {
             char* spec = GET_STRING_RELOPTION(opts, spec);
-            cJSON *spec_json = cJSON_Parse(spec);
-            if (spec_json == NULL)
+            bool empty = strcmp(spec, "") == 0;
+            if (empty || cJSON_Parse(spec) == NULL)
             {
                 ereport(ERROR,
                         (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                         errmsg("Invalid spec: %s", spec),
-                         errhint("Spec must be a valid JSON object e.g.'{\"serverless\":{\"cloud\":\"aws\",\"region\":\"us-west-2\"}}'")));
+                        (empty ? errmsg("Spec cannot be empty") : errmsg("Invalid spec: %s", spec)),
+                        errhint("Spec should be a valid JSON object e.g.'{\"serverless\":{\"cloud\":\"aws\",\"region\":\"us-west-2\"}}'. Refer to https://docs.pinecone.io/reference/create_index")));
             }
         }
     }
