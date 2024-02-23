@@ -325,6 +325,29 @@ vector_out(PG_FUNCTION_ARGS)
 }
 
 /*
+ * report operator class's corresponding pinecone metric type
+ */
+PGDLLEXPORT PG_FUNCTION_INFO_V1(vector_l2_pinecone_metric_name);
+Datum
+vector_l2_pinecone_metric_name(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_CSTRING("euclidean");
+}
+PGDLLEXPORT PG_FUNCTION_INFO_V1(vector_ip_pinecone_metric_name);
+Datum
+vector_ip_pinecone_metric_name(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_CSTRING("dotproduct");
+}
+PGDLLEXPORT PG_FUNCTION_INFO_V1(vector_cosine_pinecone_metric_name);
+Datum
+vector_cosine_pinecone_metric_name(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_CSTRING("cosine");
+}
+
+
+/*
  * Print vector - useful for debugging
  */
 void

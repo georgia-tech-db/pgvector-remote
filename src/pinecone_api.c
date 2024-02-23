@@ -150,6 +150,7 @@ CURL* get_pinecone_upsert_handle(const char *api_key, const char *index_host, cJ
     body_str = cJSON_Print(body);
     // curl_easy_setopt(hnd, CURLOPT_WRITEDATA, response_stream);
     curl_easy_setopt(hnd, CURLOPT_POSTFIELDS, body_str);
+    // set writeback
     return hnd;
     // ret = curl_easy_perform(hnd);
     // fflush(response_stream);

@@ -79,6 +79,19 @@ PineconeInit(void)
     MarkGUCPrefixReserved("pinecone");
 }
 
+static char*
+get_opclass_pinecone_metric(Relation index)
+{
+    FmgrInfo *procinfo;
+    Oid collation;
+    Datum datum;
+    procinfo = index_getprocinfo(index, 1, 2); // lookup the second support function in the opclass for the first attribute
+    collation = index->rd_indcollation[0]; // get the collation of the first attribute
+    datum = FunctionCall0Coll(procinfo, collation); // call the support function
+    return DatumGetCString(datum);
+}
+
+
 typedef struct PineconeBuildState
 {
     int64 indtuples; // total number of tuples indexed
@@ -116,13 +129,27 @@ IndexBuildResult *pinecone_build(Relation heap, Relation index, IndexInfo *index
     PineconeOptions *opts = (PineconeOptions *) index->rd_options;
     IndexBuildResult *result = palloc(sizeof(IndexBuildResult));
     PineconeBuildState buildstate;
+    char *metric;
+    char *opclass_metric;
     dimensions = TupleDescAttr(index->rd_att, 0)->atttypmod;
+    // validate pinecone metric
+    metric = GET_STRING_RELOPTION(opts, metric);
+    opclass_metric = get_opclass_pinecone_metric(index);
+    if (strcmp(metric, opclass_metric) != 0)
+    {
+        // abort the current transaction
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("Invalid pinecone metric %s for this opclass.", metric),
+                 errhint("Metric should be %s", opclass_metric)));
+    }
+
     // create a pinecone_index_name like _pgvector_remote_{rd_id}
     snprintf(pinecone_index_name, 100, "pgvector-remote-index-oid-%d", index->rd_id);
     //
     spec = GET_STRING_RELOPTION(opts, spec);
     buffer_threshold = opts->buffer_threshold;
-    create_response = create_index(pinecone_api_key, pinecone_index_name, dimensions, "euclidean", spec);
+    create_response = create_index(pinecone_api_key, pinecone_index_name, dimensions, metric, spec);
     // log the response host
     host = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(create_response, "host"));
     CreateMetaPage(index, dimensions, host, pinecone_index_name, buffer_threshold, MAIN_FORKNUM);
@@ -794,7 +821,7 @@ Datum pineconehandler(PG_FUNCTION_ARGS)
     IndexAmRoutine *amroutine = makeNode(IndexAmRoutine);
 
     amroutine->amstrategies = 0;
-    amroutine->amsupport = 1; /* number of support functions */
+    amroutine->amsupport = 2; /* number of support functions */
 #if PG_VERSION_NUM >= 130000
     amroutine->amoptsprocnum = 0;
 #endif
