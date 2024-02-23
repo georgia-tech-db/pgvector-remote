@@ -118,6 +118,14 @@ pinecone_build_callback(Relation index, ItemPointer tid, Datum *values, bool *is
     buildstate->indtuples++;
 }
 
+void validate_api_key(void) {
+    if (pinecone_api_key == NULL) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("Pinecone API key not set"),
+                 errhint("Set the pinecone API key using the pinecone.api_key GUC. E.g. ALTER SYSTEM SET pinecone.api_key TO 'your-api-key'")));
+    }
+}
 
 IndexBuildResult *pinecone_build(Relation heap, Relation index, IndexInfo *indexInfo)
 {
@@ -140,6 +148,7 @@ IndexBuildResult *pinecone_build(Relation heap, Relation index, IndexInfo *index
     //
     spec = GET_STRING_RELOPTION(opts, spec);
     buffer_threshold = opts->buffer_threshold;
+    validate_api_key();
     create_response = create_index(pinecone_api_key, pinecone_index_name, dimensions, pinecone_metric_name, spec);
     // log the response host
     host = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(create_response, "host"));
