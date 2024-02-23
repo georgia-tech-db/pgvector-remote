@@ -432,19 +432,6 @@ cJSON* index_tuple_get_pinecone_vector(Relation index, IndexTuple itup) {
     return tuple_get_pinecone_vector(itup_desc, itup_values, itup_isnull, vector_id);
 }
 
-cJSON* heap_tuple_get_pinecone_vector(Relation heap, HeapTuple htup) {
-    int natts = heap->rd_att->natts;
-    Datum *htup_values = (Datum *) palloc(sizeof(Datum) * natts);
-    bool *htup_isnull = (bool *) palloc(sizeof(bool) * natts);
-    TupleDesc htup_desc = heap->rd_att;
-    char vector_id[6 + 1]; // derive the vector_id from the heap_tid
-    cJSON *json_vector;
-    heap_deform_tuple(htup, htup_desc, htup_values, htup_isnull);
-    snprintf(vector_id, sizeof(vector_id), "%02x%02x%02x", htup->t_self.ip_blkid.bi_hi, htup->t_self.ip_blkid.bi_lo, htup->t_self.ip_posid);
-    json_vector = tuple_get_pinecone_vector(htup_desc, htup_values, htup_isnull, vector_id);
-    return json_vector;
-}
-
 
 void InsertBufferTupleMemCtx(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heapRel, IndexUniqueCheck checkUnique, IndexInfo *indexInfo)
 {
