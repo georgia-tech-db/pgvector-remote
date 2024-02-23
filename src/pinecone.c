@@ -40,6 +40,7 @@ typedef struct PineconeOptions
 	int32		vl_len_;		/* varlena header (do not touch directly!) */
     int         spec; // spec is a string; this is its offset in the rd_options
     int         buffer_threshold; // threshold for the buffer before flushing to remote vector store.
+    int         metric; // metric is a string; this is its offset in the rd_options
 }			PineconeOptions;
 
 char *pinecone_api_key = NULL;
@@ -54,15 +55,17 @@ PineconeInit(void)
                              "defa",
                             NULL,
                              AccessExclusiveLock);
-
+    add_string_reloption(pinecone_relopt_kind, "metric",
+                            "Metric of the Pinecone Index. Refer to https://docs.pinecone.io/reference/create_index",
+                             "euclidean",
+                            NULL,
+                             AccessExclusiveLock);
     add_int_reloption(pinecone_relopt_kind, "buffer_threshold",
                         "Buffer Threshold value",
                         PINECONE_DEFAULT_BUFFER_THRESHOLD,
                         PINECONE_MIN_BUFFER_THRESHOLD,
                         PINECONE_MAX_BUFFER_THRESHOLD,
                         AccessExclusiveLock);
-    // add_int_reloption(pinecone_relopt_kind, "spec", "Pinecone configuration",
-                      // 0, 0, 10, AccessExclusiveLock);
     DefineCustomStringVariable("pinecone.api_key",
                               "Pinecone API key",
                               "Pinecone API key",
@@ -530,16 +533,33 @@ no_costestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 
 
 
-bytea * no_options(Datum reloptions, bool validate)
+bytea * pinecone_options(Datum reloptions, bool validate)
 {
+    PineconeOptions *opts;
 	static const relopt_parse_elt tab[] = {
 		{"spec", RELOPT_TYPE_STRING, offsetof(PineconeOptions, spec)},
-        {"buffer_threshold", RELOPT_TYPE_INT, offsetof(PineconeOptions, buffer_threshold)}
+        {"buffer_threshold", RELOPT_TYPE_INT, offsetof(PineconeOptions, buffer_threshold)},
+        {"metric", RELOPT_TYPE_STRING, offsetof(PineconeOptions, metric)},
 	};
-	return (bytea *) build_reloptions(reloptions, validate,
-									  pinecone_relopt_kind,
-									  sizeof(PineconeOptions),
-									  tab, lengthof(tab));
+    opts = (PineconeOptions *) build_reloptions(reloptions, validate,
+                                      pinecone_relopt_kind,
+                                      sizeof(PineconeOptions),
+                                      tab, lengthof(tab));
+    if (validate)
+    {
+        if (opts && opts->metric) {
+            char* metric = GET_STRING_RELOPTION(opts, metric);
+            // check that metric is one of "euclidean", "cosine", "dotproduct"
+            if (strcmp(metric, "euclidean") != 0 && strcmp(metric, "cosine") != 0 && strcmp(metric, "dotproduct") != 0)
+            {
+                ereport(ERROR,
+                        (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                         errmsg("Invalid metric: %s", metric),
+                         errhint("Metric must be one of 'euclidean', 'cosine', 'dotproduct'")));
+            }
+        }
+    }
+	return (bytea *) opts;
 }
 
 bool
@@ -807,7 +827,7 @@ Datum pineconehandler(PG_FUNCTION_ARGS)
     // included cols should always return true since there is little point in an included column if it can't be returned
     amroutine->amcanreturn = NULL; // do we support index-only scans?
     amroutine->amcostestimate = no_costestimate;
-    amroutine->amoptions = no_options;
+    amroutine->amoptions = pinecone_options;
     amroutine->amproperty = NULL;            /* TODO AMPROP_DISTANCE_ORDERABLE */
     amroutine->ambuildphasename = NULL;      // maps build phase number to name
     amroutine->amvalidate = no_validate; // check that the operator class is valid (provide the opclass's object id)

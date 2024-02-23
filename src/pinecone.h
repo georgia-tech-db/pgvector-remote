@@ -68,7 +68,7 @@ extern bool pinecone_insert(Relation index, Datum *values, bool *isnull, ItemPoi
 extern IndexBulkDeleteResult *no_bulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats, IndexBulkDeleteCallback callback, void *callback_state);
 extern IndexBulkDeleteResult *no_vacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats);
 extern void no_costestimate(PlannerInfo *root, IndexPath *path, double loop_count, Cost *indexStartupCost, Cost *indexTotalCost, Selectivity *indexSelectivity, double *indexCorrelation, double *indexPages);
-extern bytea * no_options(Datum reloptions, bool validate);
+extern bytea * pinecone_options(Datum reloptions, bool validate);
 extern bool no_validate(Oid opclassoid);
 extern IndexScanDesc pinecone_beginscan(Relation index, int nkeys, int norderbys);
 extern void pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int norderbys);
