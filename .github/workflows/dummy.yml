@@ -1,0 +1,8 @@
+name: dummy_workflow
+on: [push, pull_request]
+jobs:
+    ubuntu:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Run dummy workflow step
+              run: echo "Hello, world!"
