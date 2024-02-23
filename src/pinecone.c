@@ -309,10 +309,12 @@ bool pinecone_insert(Relation index, Datum *values, bool *isnull, ItemPointer he
     incrMetaPageBufferFullness(index);
     pinecone_meta = ReadMetaPage(index);
     elog(DEBUG1, "Buffer fullness: %d", pinecone_meta.buffer_fullness);
+
     // if the buffer is full, flush it to the remote index
     if (pinecone_meta.buffer_fullness == pinecone_meta.buffer_threshold) {
         elog(DEBUG1, "Buffer fullness = %d, flushing to remote index", pinecone_meta.buffer_fullness);
         json_vectors = get_buffer_pinecone_vectors(index);
+        elog(DEBUG2, "Json Vectors : %s", cJSON_Print(json_vectors));
         pinecone_bulk_upsert(pinecone_api_key, pinecone_meta.host, json_vectors, PINECONE_DEFAULT_BATCH_SIZE);
         elog(DEBUG1, "Buffer flushed to remote index. Now clearing buffer");
         clear_buffer(index);

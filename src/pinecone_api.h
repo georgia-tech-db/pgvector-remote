@@ -7,6 +7,7 @@
 typedef CURL** CURLHandleList;
 
 struct curl_slist *create_common_headers(const char *api_key);
+size_t write_callback(char* ptr, size_t size, size_t nmemb, void* userdata);
 void set_curl_options(CURL *hnd, const char *api_key, const char *url, const char *method);
 cJSON* describe_index(const char *api_key, const char *index_name);
 cJSON* create_index(const char *api_key, const char *index_name, const int dimension, const char *metric, const char *spec);
