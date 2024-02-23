@@ -156,16 +156,15 @@ IndexBuildResult *pinecone_build(Relation heap, Relation index, IndexInfo *index
     // create buffer
     CreateBufferHead(index, MAIN_FORKNUM);
     // now we need to wait until the pinecone index is done initializing
-    sleep(1); // sleep for 1 second to allow pinecone to register the index.
     while (true)
     {
+        elog(DEBUG1, "Waiting for remote index to initialize...");
+        sleep(1);
         describe_index_response = describe_index(pinecone_api_key, pinecone_index_name);
         if (cJSON_IsTrue(cJSON_GetObjectItem(cJSON_GetObjectItem(describe_index_response, "status"), "ready")))
         {
             break;
         }
-        elog(DEBUG1, "Waiting for remote index to initialize...");
-        sleep(1);
     }
 
     // initialize the buildstate
@@ -449,9 +448,11 @@ cJSON* heap_tuple_get_pinecone_vector(Relation heap, HeapTuple htup) {
     bool *htup_isnull = (bool *) palloc(sizeof(bool) * natts);
     TupleDesc htup_desc = heap->rd_att;
     char vector_id[6 + 1]; // derive the vector_id from the heap_tid
+    cJSON *json_vector;
     heap_deform_tuple(htup, htup_desc, htup_values, htup_isnull);
     snprintf(vector_id, sizeof(vector_id), "%02x%02x%02x", htup->t_self.ip_blkid.bi_hi, htup->t_self.ip_blkid.bi_lo, htup->t_self.ip_posid);
-    return tuple_get_pinecone_vector(htup_desc, htup_values, htup_isnull, vector_id);
+    json_vector = tuple_get_pinecone_vector(htup_desc, htup_values, htup_isnull, vector_id);
+    return json_vector;
 }
 
 
