@@ -704,6 +704,9 @@ pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, i
     // response has a matches array, set opaque to the child of matches aka first match
     matches = cJSON_GetObjectItemCaseSensitive(pinecone_response, "matches");
     so->pinecone_results = matches->child;
+    if (matches->child == NULL) {
+        elog(NOTICE, "Pinecone did not return any results. This is expected in two cases: 1) pinecone needs a few seconds before the vectors are available for search 2) you have inserted fewer than pinecone.buffer_size = TODO vectors in which case all the vectors are still in the buffer and the buffer hasn't been flushed to the remote index yet. You can force a flush with TODO.");
+    }
     
     // TODO understand these
     /* Count index scan for stats */
