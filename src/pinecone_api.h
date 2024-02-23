@@ -18,5 +18,6 @@ cJSON* pinecone_api_query_index(const char *api_key, const char *index_host, con
 CURL* get_pinecone_upsert_handle(const char *api_key, const char *index_host, cJSON *vectors);
 cJSON* batch_vectors(cJSON *vectors, int batch_size);
 void pinecone_bulk_upsert(const char *api_key, const char *index_host, cJSON *vectors, int batch_size);
+size_t write_callback(char *ptr, size_t size, size_t nmemb, void *userdata);
 
 #endif // PINECONE_API_H

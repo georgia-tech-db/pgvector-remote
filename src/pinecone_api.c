@@ -5,6 +5,13 @@
 #include "pinecone_api.h"
 #include "postgres.h"
 
+size_t write_callback(char *ptr, size_t size, size_t nmemb, void *userdata) {
+    // (void)userdata; // Unused
+    // fwrite(ptr, size, nmemb < 100 ? nmemb : 100, stdout);
+    elog(DEBUG1, "Curl Response: %s", ptr);
+    return size * nmemb;
+}
+
 struct curl_slist *create_common_headers(const char *api_key) {
     struct curl_slist *headers = NULL;
     char api_key_header[100] = "Api-Key: "; strcat(api_key_header, api_key);
@@ -150,6 +157,7 @@ CURL* get_pinecone_upsert_handle(const char *api_key, const char *index_host, cJ
     body_str = cJSON_Print(body);
     // curl_easy_setopt(hnd, CURLOPT_WRITEDATA, response_stream);
     curl_easy_setopt(hnd, CURLOPT_POSTFIELDS, body_str);
+    curl_easy_setopt(hnd, CURLOPT_WRITEFUNCTION, write_callback); // log the response
     // set writeback
     return hnd;
     // ret = curl_easy_perform(hnd);
