@@ -58,7 +58,7 @@ PineconeInit(void)
     pinecone_relopt_kind = add_reloption_kind();
     add_string_reloption(pinecone_relopt_kind, "spec",
                             "Specification of the Pinecone Index. Refer to https://docs.pinecone.io/reference/create_index",
-                             "defa",
+                            "",
                             NULL,
                              AccessExclusiveLock);
     add_int_reloption(pinecone_relopt_kind, "buffer_threshold",
@@ -118,6 +118,14 @@ pinecone_build_callback(Relation index, ItemPointer tid, Datum *values, bool *is
     buildstate->indtuples++;
 }
 
+void validate_api_key(void) {
+    if (pinecone_api_key == NULL) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("Pinecone API key not set"),
+                 errhint("Set the pinecone API key using the pinecone.api_key GUC. E.g. ALTER SYSTEM SET pinecone.api_key TO 'your-api-key'")));
+    }
+}
 
 IndexBuildResult *pinecone_build(Relation heap, Relation index, IndexInfo *indexInfo)
 {
@@ -140,6 +148,7 @@ IndexBuildResult *pinecone_build(Relation heap, Relation index, IndexInfo *index
     //
     spec = GET_STRING_RELOPTION(opts, spec);
     buffer_threshold = opts->buffer_threshold;
+    validate_api_key();
     create_response = create_index(pinecone_api_key, pinecone_index_name, dimensions, pinecone_metric_name, spec);
     // log the response host
     host = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(create_response, "host"));
@@ -386,6 +395,14 @@ cJSON* tuple_get_pinecone_vector(TupleDesc tup_desc, Datum *values, bool *isnull
     Vector *vector;
     cJSON *json_values;
     vector = DatumGetVector(values[0]);
+    if (vector_eq_zero_internal(vector))
+    {
+        // tell the user that the vector is an invalid datavalue because it contains a zero vector
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("Invalid vector: zero vector"),
+                 errhint("Pinecone dense vectors cannot be zero in all dimensions")));
+    }
     json_values = cJSON_CreateFloatArray(vector->x, vector->dim);
     // prepare metadata
     for (int i = 0; i < tup_desc->natts; i++)
@@ -421,19 +438,6 @@ cJSON* index_tuple_get_pinecone_vector(Relation index, IndexTuple itup) {
     index_deform_tuple(itup, itup_desc, itup_values, itup_isnull);
     snprintf(vector_id, sizeof(vector_id), "%02x%02x%02x", itup->t_tid.ip_blkid.bi_hi, itup->t_tid.ip_blkid.bi_lo, itup->t_tid.ip_posid);
     return tuple_get_pinecone_vector(itup_desc, itup_values, itup_isnull, vector_id);
-}
-
-cJSON* heap_tuple_get_pinecone_vector(Relation heap, HeapTuple htup) {
-    int natts = heap->rd_att->natts;
-    Datum *htup_values = (Datum *) palloc(sizeof(Datum) * natts);
-    bool *htup_isnull = (bool *) palloc(sizeof(bool) * natts);
-    TupleDesc htup_desc = heap->rd_att;
-    char vector_id[6 + 1]; // derive the vector_id from the heap_tid
-    cJSON *json_vector;
-    heap_deform_tuple(htup, htup_desc, htup_values, htup_isnull);
-    snprintf(vector_id, sizeof(vector_id), "%02x%02x%02x", htup->t_self.ip_blkid.bi_hi, htup->t_self.ip_blkid.bi_lo, htup->t_self.ip_posid);
-    json_vector = tuple_get_pinecone_vector(htup_desc, htup_values, htup_isnull, vector_id);
-    return json_vector;
 }
 
 
@@ -565,16 +569,15 @@ bytea * pinecone_options(Datum reloptions, bool validate)
                                       tab, lengthof(tab));
     if (validate)
     {
-        // check that spec is a valid json
         if (opts && opts->spec) {
             char* spec = GET_STRING_RELOPTION(opts, spec);
-            cJSON *spec_json = cJSON_Parse(spec);
-            if (spec_json == NULL)
+            bool empty = strcmp(spec, "") == 0;
+            if (empty || cJSON_Parse(spec) == NULL)
             {
                 ereport(ERROR,
                         (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                         errmsg("Invalid spec: %s", spec),
-                         errhint("Spec must be a valid JSON object e.g.'{\"serverless\":{\"cloud\":\"aws\",\"region\":\"us-west-2\"}}'")));
+                        (empty ? errmsg("Spec cannot be empty") : errmsg("Invalid spec: %s", spec)),
+                        errhint("Spec should be a valid JSON object e.g.'{\"serverless\":{\"cloud\":\"aws\",\"region\":\"us-west-2\"}}'. Refer to https://docs.pinecone.io/reference/create_index")));
             }
         }
     }
@@ -696,6 +699,9 @@ pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, i
     // response has a matches array, set opaque to the child of matches aka first match
     matches = cJSON_GetObjectItemCaseSensitive(pinecone_response, "matches");
     so->pinecone_results = matches->child;
+    if (matches->child == NULL) {
+        elog(NOTICE, "Pinecone did not return any results. This is expected in two cases: 1) pinecone needs a few seconds before the vectors are available for search 2) you have inserted fewer than pinecone.buffer_size = TODO vectors in which case all the vectors are still in the buffer and the buffer hasn't been flushed to the remote index yet. You can force a flush with TODO.");
+    }
     
     // TODO understand these
     /* Count index scan for stats */

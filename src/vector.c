@@ -912,6 +912,18 @@ vector_cmp_internal(Vector * a, Vector * b)
 	return 0;
 }
 
+bool
+vector_eq_zero_internal(Vector * a)
+{
+	for (int i = 0; i < a->dim; i++)
+	{
+		if (a->x[i] != 0)
+			return false;
+	}
+
+	return true;
+}
+
 /*
  * Less than
  */

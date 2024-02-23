@@ -30,5 +30,6 @@ typedef struct Vector
 Vector	   *InitVector(int dim);
 void		PrintVector(char *msg, Vector * vector);
 int			vector_cmp_internal(Vector * a, Vector * b);
+bool		vector_eq_zero_internal(Vector * a);
 
 #endif
