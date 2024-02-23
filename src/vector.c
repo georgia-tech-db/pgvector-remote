@@ -331,19 +331,19 @@ PGDLLEXPORT PG_FUNCTION_INFO_V1(vector_l2_pinecone_metric_name);
 Datum
 vector_l2_pinecone_metric_name(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_CSTRING("euclidean");
+	PG_RETURN_INT32(EUCLIDEAN_METRIC);
 }
 PGDLLEXPORT PG_FUNCTION_INFO_V1(vector_ip_pinecone_metric_name);
 Datum
 vector_ip_pinecone_metric_name(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_CSTRING("dotproduct");
+	PG_RETURN_INT32(INNER_PRODUCT_METRIC);
 }
 PGDLLEXPORT PG_FUNCTION_INFO_V1(vector_cosine_pinecone_metric_name);
 Datum
 vector_cosine_pinecone_metric_name(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_CSTRING("cosine");
+	PG_RETURN_INT32(COSINE_METRIC);
 }
 
 
