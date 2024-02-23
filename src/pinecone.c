@@ -40,7 +40,6 @@ typedef struct PineconeOptions
 	int32		vl_len_;		/* varlena header (do not touch directly!) */
     int         spec; // spec is a string; this is its offset in the rd_options
     int         buffer_threshold; // threshold for the buffer before flushing to remote vector store.
-    int         metric; // metric is a string; this is its offset in the rd_options
 }			PineconeOptions;
 
 char *pinecone_api_key = NULL;
@@ -53,11 +52,6 @@ PineconeInit(void)
     add_string_reloption(pinecone_relopt_kind, "spec",
                             "Specification of the Pinecone Index. Refer to https://docs.pinecone.io/reference/create_index",
                              "defa",
-                            NULL,
-                             AccessExclusiveLock);
-    add_string_reloption(pinecone_relopt_kind, "metric",
-                            "Metric of the Pinecone Index. Refer to https://docs.pinecone.io/reference/create_index",
-                             "euclidean",
                             NULL,
                              AccessExclusiveLock);
     add_int_reloption(pinecone_relopt_kind, "buffer_threshold",
@@ -577,7 +571,6 @@ bytea * pinecone_options(Datum reloptions, bool validate)
 	static const relopt_parse_elt tab[] = {
 		{"spec", RELOPT_TYPE_STRING, offsetof(PineconeOptions, spec)},
         {"buffer_threshold", RELOPT_TYPE_INT, offsetof(PineconeOptions, buffer_threshold)},
-        {"metric", RELOPT_TYPE_STRING, offsetof(PineconeOptions, metric)},
 	};
     opts = (PineconeOptions *) build_reloptions(reloptions, validate,
                                       pinecone_relopt_kind,
@@ -585,17 +578,6 @@ bytea * pinecone_options(Datum reloptions, bool validate)
                                       tab, lengthof(tab));
     if (validate)
     {
-        if (opts && opts->metric) {
-            char* metric = GET_STRING_RELOPTION(opts, metric);
-            // check that metric is one of "euclidean", "cosine", "dotproduct"
-            if (strcmp(metric, "euclidean") != 0 && strcmp(metric, "cosine") != 0 && strcmp(metric, "dotproduct") != 0)
-            {
-                ereport(ERROR,
-                        (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                         errmsg("Invalid metric: %s", metric),
-                         errhint("Metric must be one of 'euclidean', 'cosine', 'dotproduct'")));
-            }
-        }
         // check that spec is a valid json
         if (opts && opts->spec) {
             char* spec = GET_STRING_RELOPTION(opts, spec);
