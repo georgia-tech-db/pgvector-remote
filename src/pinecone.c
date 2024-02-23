@@ -152,7 +152,7 @@ IndexBuildResult *pinecone_build(Relation heap, Relation index, IndexInfo *index
     create_response = create_index(pinecone_api_key, pinecone_index_name, dimensions, metric, spec);
     // log the response host
     host = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(create_response, "host"));
-    CreateMetaPage(index, dimensions, host, pinecone_index_name, buffer_threshold, MAIN_FORKNUM);
+    CreateMetaPage(index, dimensions, host, pinecone_index_name, buffer_threshold, metric, MAIN_FORKNUM);
     // create buffer
     CreateBufferHead(index, MAIN_FORKNUM);
     // now we need to wait until the pinecone index is done initializing
@@ -186,7 +186,7 @@ void no_buildempty(Relation index){}; // for some reason this is never called ev
 #define PineconePageGetOpaque(page)	((PineconeBufferOpaque) PageGetSpecialPointer(page))
 #define PineconePageGetMeta(page)	((PineconeMetaPageData *) PageGetContents(page))
 
-void CreateMetaPage(Relation index, int dimensions, char *host, char *pinecone_index_name, int buffer_threshold, int forkNum)
+void CreateMetaPage(Relation index, int dimensions, char *host, char *pinecone_index_name, int buffer_threshold, char *metric, int forkNum)
 {
     Buffer buf;
     Page page; // a page is a block of memory, formatted as a page
@@ -203,6 +203,16 @@ void CreateMetaPage(Relation index, int dimensions, char *host, char *pinecone_i
     metap->dimensions = dimensions;
     metap->buffer_fullness = 0;
     metap->buffer_threshold = buffer_threshold;
+    if (strcmp(metric, "euclidean") == 0)
+    {
+        metap->metric = L2;
+    } else if (strcmp(metric, "cosine") == 0)
+    {
+        metap->metric = COSINE;
+    } else if (strcmp(metric, "dotproduct") == 0)
+    {
+        metap->metric = INNER;
+    }
     strcpy(metap->host, host);
     strcpy(metap->pinecone_index_name, pinecone_index_name);
     ((PageHeader) page)->pd_lower = ((char *) metap - (char *) page) + sizeof(PineconeMetaPageData);
@@ -654,6 +664,8 @@ pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, i
     // log the metadata
     elog(DEBUG1, "nkeys: %d", nkeys);
     pinecone_metadata = ReadMetaPage(scan->indexRelation);    
+    so->dimensions = pinecone_metadata.dimensions;
+    so->metric = pinecone_metadata.metric;
 
 
     if (scan->numberOfOrderBys == 0 || orderbys[0].sk_attno != 1) {
@@ -760,6 +772,7 @@ pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, i
     
     // get the first tuple from the sortstate
     so->more_buffer_tuples = tuplesort_gettupleslot(so->sortstate, true, false, so->slot, NULL);
+
 }
 
 /*
@@ -773,19 +786,43 @@ pinecone_gettuple(IndexScanDesc scan, ScanDirection dir)
 	ItemPointerData match_heaptid;
     PineconeScanOpaque so = (PineconeScanOpaque) scan->opaque;
     cJSON *match = so->pinecone_results;
-    double pinecone_top_score;
-    double buffer_top_score;
+    double pinecone_best_dist;
+    double buffer_best_dist;
     bool isnull;
 
-    pinecone_top_score = (match != NULL) ? cJSON_GetNumberValue(cJSON_GetObjectItemCaseSensitive(match, "score")) : __DBL_MAX__;
-    buffer_top_score = (so->more_buffer_tuples) ? DatumGetFloat8(slot_getattr(so->slot, 1, &isnull)) : __DBL_MAX__;
+    // use a case statement to determine the best distance
+    if (match == NULL) {
+        pinecone_best_dist = __DBL_MAX__;
+    } else {
+        switch (so->metric)
+        {
+        case L2:
+            // pinecone returns the square of the euclidean distance, which is what we want
+            pinecone_best_dist = cJSON_GetNumberValue(cJSON_GetObjectItemCaseSensitive(match, "score"));
+            break;
+        case COSINE:
+            // pinecone returns the cosine similarity, but we want "cosine distance" which is 1 - cosine similarity
+            pinecone_best_dist = 1 - cJSON_GetNumberValue(cJSON_GetObjectItemCaseSensitive(match, "score"));
+            break;
+        case INNER:
+            // pinecone returns the dot product, but we want "dot product distance" which is - dot product
+            pinecone_best_dist = - cJSON_GetNumberValue(cJSON_GetObjectItemCaseSensitive(match, "score"));
+            break;
+        default:
+            elog(ERROR, "unsupported metric");
+        }
+    }
+    
+                          
+    buffer_best_dist = (so->more_buffer_tuples) ? DatumGetFloat8(slot_getattr(so->slot, 1, &isnull)) : __DBL_MAX__;
     // log (match == NULL) so->more_buffer_tuples and the scores
 
     // merge the results from the buffer and the remote index
     if (match == NULL && !so->more_buffer_tuples) {
         return false;
     }
-    else if (buffer_top_score < pinecone_top_score) {
+    else if (buffer_best_dist < pinecone_best_dist) {
+        // use the buffer tuple
         Datum datum;
         datum = slot_getattr(so->slot, 2, &isnull);
         match_heaptid = *((ItemPointer) DatumGetPointer(datum));

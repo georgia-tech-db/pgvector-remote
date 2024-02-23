@@ -16,10 +16,20 @@
 #define PINECONE_MIN_BUFFER_THRESHOLD 1
 #define PINECONE_MAX_BUFFER_THRESHOLD 10000
 
+// metric enum
+typedef enum PineconeMetric
+{
+    INVALID,
+    L2,
+    COSINE,
+    INNER
+} PineconeMetric;
+
 // structs
 typedef struct PineconeScanOpaqueData
 {
     int dimensions;
+    PineconeMetric metric;
     bool first;
 
     // sorting
@@ -47,6 +57,7 @@ typedef struct PineconeMetaPageData
     int buffer_threshold;
     char host[100];
     char pinecone_index_name[60];
+    PineconeMetric metric;
 } PineconeMetaPageData;
 typedef PineconeMetaPageData *PineconeMetaPage;
 
@@ -78,7 +89,7 @@ extern void no_endscan(IndexScanDesc scan);
 
 // void CreateMetaPage(Relation index, int dimensions, int lists, int forkNum)
 extern void pinecone_buildempty(Relation index);
-extern void CreateMetaPage(Relation index, int dimensions, char *host, char *pinecone_index_name, int buffer_threshold, int forkNum);
+extern void CreateMetaPage(Relation index, int dimensions, char *host, char *pinecone_index_name, int buffer_threshold, char* metric, int forkNum);
 extern void CreateBufferHead(Relation index, int forkNum);
 extern PineconeMetaPageData ReadMetaPage(Relation index);
 void		PineconeInit(void);
