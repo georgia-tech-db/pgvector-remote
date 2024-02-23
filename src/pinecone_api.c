@@ -123,9 +123,7 @@ void pinecone_bulk_upsert(const char *api_key, const char *index_host, cJSON *ve
     CURLM *multi_handle = curl_multi_init();
     cJSON *batch_handle;
     int running;
-    elog(DEBUG2, "Batches: %s", cJSON_Print(batches));
     cJSON_ArrayForEach(batch, batches) {
-        elog(DEBUG2, "Batch: %s", cJSON_Print(batch));
         batch_handle = get_pinecone_upsert_handle(api_key, index_host, cJSON_Duplicate(batch, true)); // TODO: figure out why i have to deepcopy
         curl_multi_add_handle(multi_handle, batch_handle);
     }
@@ -146,12 +144,6 @@ void pinecone_bulk_upsert(const char *api_key, const char *index_host, cJSON *ve
 }
 
 
-size_t write_callback(char* ptr, size_t size, size_t nmemb, void* userdata) {
-    // (void)userdata;
-    elog(DEBUG1, "Response data: %s", ptr);
-    return size * nmemb;
-}
-
 CURL* get_pinecone_upsert_handle(const char *api_key, const char *index_host, cJSON *vectors) {
     // char response_data[40960] = "";
     CURL *hnd = curl_easy_init();
@@ -163,8 +155,7 @@ CURL* get_pinecone_upsert_handle(const char *api_key, const char *index_host, cJ
     cJSON_AddItemToObject(body, "vectors", vectors);
     set_curl_options(hnd, api_key, url, "POST");
     body_str = cJSON_Print(body);
-    // Log the response from pinecone.
-    curl_easy_setopt(hnd, CURLOPT_WRITEFUNCTION, write_callback);
+    // curl_easy_setopt(hnd, CURLOPT_WRITEDATA, response_stream);
     curl_easy_setopt(hnd, CURLOPT_POSTFIELDS, body_str);
     curl_easy_setopt(hnd, CURLOPT_WRITEFUNCTION, write_callback); // log the response
     // set writeback
