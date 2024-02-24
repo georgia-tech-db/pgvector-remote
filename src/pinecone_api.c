@@ -7,15 +7,19 @@
 
 size_t write_callback(char *contents, size_t size, size_t nmemb, void *userdata) {
     size_t real_size = size * nmemb; // size of the response
-    char **str = (char **)userdata; // cast the userdata to a string pointer
-    *str = malloc(real_size + 1); // allocate memory for the response
-    if (*str == NULL) {
-        ereport(ERROR, (errmsg("Failed to allocate memory for response")));
-        return 0;
+    // char **str = (char **)userdata; // cast the userdata to a string pointer
+    ResponseData *response_data = (ResponseData *)userdata;
+    if (response_data->data == NULL) {
+        response_data->data = malloc(real_size + 1);
+        memcpy(response_data->data, contents, real_size);
+        response_data->length = real_size;
+    } else {
+        response_data->data = realloc(response_data->data, response_data->length + real_size);
+        memcpy(response_data->data + response_data->length, contents, real_size);
+        response_data->length += real_size;
     }
-    memcpy(*str, contents, real_size);
-    (*str)[real_size] = '\0'; // null terminate the string
-    elog(DEBUG1, "Response (write_callback): %s", *str);
+    response_data->data[response_data->length] = '\0'; // null terminate the string
+    elog(DEBUG1, "Response (write_callback): %s", contents);
     return real_size;
 }
 
@@ -28,7 +32,7 @@ struct curl_slist *create_common_headers(const char *api_key) {
     return headers;
 }
 
-void set_curl_options(CURL *hnd, const char *api_key, const char *url, const char *method, char** response_data) {
+void set_curl_options(CURL *hnd, const char *api_key, const char *url, const char *method, ResponseData *response_data) {
     struct curl_slist *headers = create_common_headers(api_key);
     curl_easy_setopt(hnd, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(hnd, CURLOPT_CUSTOMREQUEST, method);
@@ -43,12 +47,25 @@ void set_curl_options(CURL *hnd, const char *api_key, const char *url, const cha
 cJSON* describe_index(const char *api_key, const char *index_name) {
     CURL *hnd = curl_easy_init();
     cJSON *response_json;
-    char *response_data = NULL;
+    ResponseData response_data = {NULL, 0};
     char url[100] = "https://api.pinecone.io/indexes/"; strcat(url, index_name);
     set_curl_options(hnd, api_key, url, "GET", &response_data);
     curl_easy_perform(hnd);
-    response_json = cJSON_Parse(response_data);
+    response_json = cJSON_Parse(response_data.data);
     return response_json;
+}
+
+cJSON* list_indexes(const char *api_key) {
+    CURL *hnd = curl_easy_init();
+    ResponseData response_data = {NULL, 0};
+    cJSON *response_json;
+    cJSON* indexes;
+    set_curl_options(hnd, api_key, "https://api.pinecone.io/indexes", "GET", &response_data);
+    curl_easy_perform(hnd);
+    response_json = cJSON_Parse(response_data.data);
+    indexes = cJSON_GetObjectItem(response_json, "indexes");
+    // todo: error handling
+    return indexes;
 }
 
 /* name, dimension, metric
@@ -60,7 +77,7 @@ cJSON* create_index(const char *api_key, const char *index_name, const int dimen
     CURL *hnd = curl_easy_init();
     cJSON *body = cJSON_CreateObject();
     cJSON *spec_json = cJSON_Parse(server_spec);
-    char *response_data = NULL;
+    ResponseData response_data = {NULL, 0};
     cJSON *response_json;
     // add fields to body
     elog(DEBUG1, "Creating index %s with dimension %d and metric %s", index_name, dimension, metric);
@@ -74,12 +91,12 @@ cJSON* create_index(const char *api_key, const char *index_name, const int dimen
     curl_easy_perform(hnd);
     curl_easy_cleanup(hnd);
     // return response_data as json
-    response_json = cJSON_Parse(response_data);
+    response_json = cJSON_Parse(response_data.data);
     return response_json;
 }
 
 cJSON* pinecone_api_query_index(const char *api_key, const char *index_host, const int topK, cJSON *query_vector_values, cJSON *filter) {
-    char* response_data = NULL;
+    ResponseData response_data = {NULL, 0};
     CURL *hnd = curl_easy_init();
     cJSON *body = cJSON_CreateObject();
     char url[100] = "https://"; strcat(url, index_host); strcat(url, "/query"); // e.g. https://t1-23kshha.svc.apw5-4e34-81fa.pinecone.io/query
@@ -92,7 +109,7 @@ cJSON* pinecone_api_query_index(const char *api_key, const char *index_host, con
     set_curl_options(hnd, api_key, url, "POST", &response_data);
     curl_easy_setopt(hnd, CURLOPT_POSTFIELDS, cJSON_Print(body));
     curl_easy_perform(hnd);
-    return cJSON_Parse(response_data);
+    return cJSON_Parse(response_data.data);
 }
 
 void pinecone_bulk_upsert(const char *api_key, const char *index_host, cJSON *vectors, int batch_size) {
@@ -126,7 +143,7 @@ CURL* get_pinecone_upsert_handle(const char *api_key, const char *index_host, cJ
     CURL *hnd = curl_easy_init();
     cJSON *body = cJSON_CreateObject();
     char *body_str;
-    char *response_data = NULL;
+    ResponseData response_data = {NULL, 0};
     char url[100] = "https://"; strcat(url, index_host); strcat(url, "/vectors/upsert"); // https://t1-23kshha.svc.apw5-4e34-81fa.pinecone.io/vectors/upsert
     cJSON_AddItemToObject(body, "vectors", vectors);
     set_curl_options(hnd, api_key, url, "POST", &response_data);

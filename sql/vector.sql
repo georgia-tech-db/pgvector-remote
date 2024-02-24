@@ -110,6 +110,20 @@ CREATE FUNCTION vector_ip_pinecone_metric_name() RETURNS int4
 CREATE FUNCTION vector_cosine_pinecone_metric_name() RETURNS int4
 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
+-- pinecone helper functions
+
+CREATE TYPE pinecone_index_stats AS (
+	name text,
+	dimension integer,
+	metric text,
+	host text,
+	status json,
+	spec json
+);
+
+CREATE FUNCTION pinecone_indexes() RETURNS SETOF pinecone_index_stats
+	AS 'MODULE_PATHNAME' LANGUAGE C VOLATILE STRICT PARALLEL SAFE;
+
 -- aggregates
 
 CREATE AGGREGATE avg(vector) (
