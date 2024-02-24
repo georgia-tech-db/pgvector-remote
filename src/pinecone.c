@@ -50,6 +50,7 @@ typedef struct PineconeOptions
 }			PineconeOptions;
 
 char *pinecone_api_key = NULL;
+int *pinecone_top_k = NULL;
 static relopt_kind pinecone_relopt_kind;
 
 void
@@ -77,6 +78,18 @@ PineconeInit(void)
                               NULL,
                               NULL,
                               NULL);
+    DefineCustomIntVariable("pinecone.top_k",
+                            "topK parameter for pinecone queries",
+                            "topK parameter for pinecone queries. Default is 10000. Lowering this value may improve performance but you will not be able to retrieve more than this number of results",
+                            pinecone_top_k,
+                            10000,
+                            1,
+                            10000,
+                            PGC_USERSET,
+                            0,
+                            NULL,
+                            NULL,
+                            NULL);
     MarkGUCPrefixReserved("pinecone");
 }
 
@@ -616,7 +629,7 @@ pinecone_beginscan(Relation index, int nkeys, int norderbys)
 
     // prep sort
     // TODO allocate 10MB for the sort (we should actually need a lot less)
-    so->sortstate = tuplesort_begin_heap(so->tupdesc, 1, attNums, sortOperators, sortCollations, nullsFirstFlags, 10000, NULL, false);
+    so->sortstate = tuplesort_begin_heap(so->tupdesc, 1, attNums, sortOperators, sortCollations, nullsFirstFlags, *pinecone_top_k, NULL, false);
     so->slot = MakeSingleTupleTableSlot(so->tupdesc, &TTSOpsMinimalTuple);
     //
     scan->opaque = so;
