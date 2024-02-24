@@ -58,8 +58,8 @@ PineconeInit(void)
     pinecone_relopt_kind = add_reloption_kind();
     add_string_reloption(pinecone_relopt_kind, "spec",
                             "Specification of the Pinecone Index. Refer to https://docs.pinecone.io/reference/create_index",
-                            "",
-                            NULL,
+                            "", 
+                            NULL, // TODO you can pass a function pointer to a validation function here, instead of doing it manually in amoptions
                              AccessExclusiveLock);
     add_int_reloption(pinecone_relopt_kind, "buffer_threshold",
                         "Buffer Threshold value",
@@ -577,7 +577,7 @@ bytea * pinecone_options(Datum reloptions, bool validate)
                 ereport(ERROR,
                         (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                         (empty ? errmsg("Spec cannot be empty") : errmsg("Invalid spec: %s", spec)),
-                        errhint("Spec should be a valid JSON object e.g.'{\"serverless\":{\"cloud\":\"aws\",\"region\":\"us-west-2\"}}'. Refer to https://docs.pinecone.io/reference/create_index")));
+                        errhint("Spec should be a valid JSON object e.g.WITH (spec='{\"serverless\":{\"cloud\":\"aws\",\"region\":\"us-west-2\"}}'). Refer to https://docs.pinecone.io/reference/create_index")));
             }
         }
     }
