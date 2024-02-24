@@ -69,7 +69,7 @@ extern bool pinecone_insert(Relation index, Datum *values, bool *isnull, ItemPoi
                             , bool indexUnchanged
 #endif
                             , IndexInfo *indexInfo);
-extern IndexBulkDeleteResult *no_bulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats, IndexBulkDeleteCallback callback, void *callback_state);
+extern IndexBulkDeleteResult *pinecone_bulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats, IndexBulkDeleteCallback callback, void *callback_state);
 extern IndexBulkDeleteResult *no_vacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats);
 extern void no_costestimate(PlannerInfo *root, IndexPath *path, double loop_count, Cost *indexStartupCost, Cost *indexTotalCost, Selectivity *indexSelectivity, double *indexCorrelation, double *indexPages);
 extern bytea * pinecone_options(Datum reloptions, bool validate);
@@ -78,6 +78,7 @@ extern IndexScanDesc pinecone_beginscan(Relation index, int nkeys, int norderbys
 extern void pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int norderbys);
 extern bool pinecone_gettuple(IndexScanDesc scan, ScanDirection dir);
 extern void no_endscan(IndexScanDesc scan);
+ItemPointerData id_get_heap_tid(char *id);
 
 
 // void CreateMetaPage(Relation index, int dimensions, int lists, int forkNum)

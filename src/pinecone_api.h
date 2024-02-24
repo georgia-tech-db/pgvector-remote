@@ -22,9 +22,12 @@ cJSON* pinecone_api_query_index(const char *api_key, const char *index_host, con
 // void pinecone_upsert(const char *api_key, const char *index_host, cJSON *vectors);
 
 // bulk insertion
-CURL* get_pinecone_upsert_handle(const char *api_key, const char *index_host, cJSON *vectors);
+CURL* get_pinecone_upsert_handle(const char *api_key, const char *index_host, cJSON *vectors, ResponseData *response_data);
 cJSON* batch_vectors(cJSON *vectors, int batch_size);
 void pinecone_bulk_upsert(const char *api_key, const char *index_host, cJSON *vectors, int batch_size);
 size_t write_callback(char *ptr, size_t size, size_t nmemb, void *userdata);
+cJSON* pinecone_list_vectors(const char *api_key, const char *index_host, int limit, char* pagination_token);
+cJSON* generic_pinecone_request(const char *api_key, const char *url, const char *method, cJSON *body);
+cJSON* pinecone_delete_vectors(const char *api_key, const char *index_host, cJSON *ids);
 
 #endif // PINECONE_API_H

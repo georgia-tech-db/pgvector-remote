@@ -6,20 +6,20 @@
 #include "postgres.h"
 
 size_t write_callback(char *contents, size_t size, size_t nmemb, void *userdata) {
-    size_t real_size = size * nmemb; // size of the response
-    // char **str = (char **)userdata; // cast the userdata to a string pointer
-    ResponseData *response_data = (ResponseData *)userdata;
-    if (response_data->data == NULL) {
-        response_data->data = malloc(real_size + 1);
-        memcpy(response_data->data, contents, real_size);
-        response_data->length = real_size;
-    } else {
-        response_data->data = realloc(response_data->data, response_data->length + real_size);
-        memcpy(response_data->data + response_data->length, contents, real_size);
+    size_t real_size = size * nmemb; // Size of the response
+    ResponseData *response_data = (ResponseData *)userdata; // Cast the userdata to the specific structure
+
+    // Attempt to resize the buffer
+    char *new_data = realloc(response_data->data, response_data->length + real_size + 1);
+    if (new_data != NULL) {
+        response_data->data = new_data;
+        memcpy(response_data->data + response_data->length, contents, real_size); // Append new data
         response_data->length += real_size;
+        response_data->data[response_data->length] = '\0'; // Null terminate the string
     }
-    response_data->data[response_data->length] = '\0'; // null terminate the string
+
     elog(DEBUG1, "Response (write_callback): %s", contents);
+
     return real_size;
 }
 
@@ -68,6 +68,37 @@ cJSON* list_indexes(const char *api_key) {
     return indexes;
 }
 
+cJSON* generic_pinecone_request(const char *api_key, const char *url, const char *method, cJSON *body) {
+    CURL *hnd = curl_easy_init();
+    ResponseData response_data = {NULL, 0};
+    cJSON *response_json;
+    set_curl_options(hnd, api_key, url, method, &response_data);
+    if (strcmp(method, "POST") == 0 || strcmp(method, "PUT") == 0) {
+        curl_easy_setopt(hnd, CURLOPT_POSTFIELDS, cJSON_Print(body));
+    }
+    curl_easy_perform(hnd);
+    response_json = cJSON_Parse(response_data.data);
+    return response_json;
+}
+
+cJSON* pinecone_list_vectors(const char *api_key, const char *index_host, int limit, char* pagination_token) {
+    char url[300];
+    if (pagination_token != NULL) {
+        sprintf(url, "https://%s/vectors/list?limit=%d&paginationToken=%s", index_host, limit, pagination_token);
+    } else {
+        sprintf(url, "https://%s/vectors/list?limit=%d", index_host, limit);
+    }
+    return cJSON_GetObjectItem(generic_pinecone_request(api_key, url, "GET", NULL), "vectors");
+}
+
+cJSON* pinecone_delete_vectors(const char *api_key, const char *index_host, cJSON *ids) {
+    cJSON *request = cJSON_CreateObject();
+    char url[300];
+    sprintf(url, "https://%s/vectors/delete", index_host);
+    cJSON_AddItemToObject(request, "ids", ids);
+    return generic_pinecone_request(api_key, url, "POST", request);
+}
+
 /* name, dimension, metric
  * serverless: cloud, region
  * pod: environment, replicas, pod_type, pods, shards, metadata_config
@@ -79,6 +110,7 @@ cJSON* create_index(const char *api_key, const char *index_name, const int dimen
     cJSON *spec_json = cJSON_Parse(server_spec);
     ResponseData response_data = {NULL, 0};
     cJSON *response_json;
+    CURLcode ret;
     // add fields to body
     elog(DEBUG1, "Creating index %s with dimension %d and metric %s", index_name, dimension, metric);
     cJSON_AddItemToObject(body, "name", cJSON_CreateString(index_name));
@@ -88,10 +120,15 @@ cJSON* create_index(const char *api_key, const char *index_name, const int dimen
     // set curl options
     set_curl_options(hnd, api_key, "https://api.pinecone.io/indexes", "POST", &response_data);
     curl_easy_setopt(hnd, CURLOPT_POSTFIELDS, cJSON_Print(body));
-    curl_easy_perform(hnd);
+    ret = curl_easy_perform(hnd);
+    if (ret != CURLE_OK) {
+        elog(ERROR, "curl_easy_perform() failed: %s\n", curl_easy_strerror(ret));
+    }
     curl_easy_cleanup(hnd);
     // return response_data as json
     response_json = cJSON_Parse(response_data.data);
+    // print the response
+    elog(DEBUG1, "Response (create_index): %s", cJSON_Print(response_json));
     return response_json;
 }
 
@@ -117,10 +154,15 @@ void pinecone_bulk_upsert(const char *api_key, const char *index_host, cJSON *ve
     cJSON *batch;
     CURLM *multi_handle = curl_multi_init();
     cJSON *batch_handle;
+    // todo we need to free the actual data in response_data
+    ResponseData* response_data = palloc(sizeof(ResponseData) * cJSON_GetArraySize(batches));
     int running;
+    int i = 0;
     cJSON_ArrayForEach(batch, batches) {
-        batch_handle = get_pinecone_upsert_handle(api_key, index_host, cJSON_Duplicate(batch, true)); // TODO: figure out why i have to deepcopy
+        response_data[i] = (ResponseData) {NULL, 0};
+        batch_handle = get_pinecone_upsert_handle(api_key, index_host, cJSON_Duplicate(batch, true), &response_data[i]); // TODO: figure out why i have to deepcopy // because batch goes out of scope
         curl_multi_add_handle(multi_handle, batch_handle);
+        i++;
     }
     // run the handles
     curl_multi_perform(multi_handle, &running);
@@ -139,14 +181,15 @@ void pinecone_bulk_upsert(const char *api_key, const char *index_host, cJSON *ve
 }
 
 
-CURL* get_pinecone_upsert_handle(const char *api_key, const char *index_host, cJSON *vectors) {
+CURL* get_pinecone_upsert_handle(const char *api_key, const char *index_host, cJSON *vectors, ResponseData* response_data) {
     CURL *hnd = curl_easy_init();
     cJSON *body = cJSON_CreateObject();
     char *body_str;
-    ResponseData response_data = {NULL, 0};
+    // this isn't safe because response_data will go out of scope before the writeback function is called
+    // furthermore, we need to be sure to free the memory allocated for response_data.data (by the writeback)
     char url[100] = "https://"; strcat(url, index_host); strcat(url, "/vectors/upsert"); // https://t1-23kshha.svc.apw5-4e34-81fa.pinecone.io/vectors/upsert
     cJSON_AddItemToObject(body, "vectors", vectors);
-    set_curl_options(hnd, api_key, url, "POST", &response_data);
+    set_curl_options(hnd, api_key, url, "POST", response_data);
     body_str = cJSON_Print(body);
     curl_easy_setopt(hnd, CURLOPT_POSTFIELDS, body_str);
     return hnd;

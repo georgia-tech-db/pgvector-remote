@@ -63,7 +63,7 @@ PineconeInit(void)
                             "", 
                             NULL, // TODO you can pass a function pointer to a validation function here, instead of doing it manually in amoptions
                              AccessExclusiveLock);
-    add_int_reloption(pinecone_relopt_kind, "buffer_threshold", // todo: this shouldn't be a reloption because then it can't be changed without a rebuild
+    add_int_reloption(pinecone_relopt_kind, "buffer_threshold", // todo: this shouldn't be a reloption because then it can't be changed without a rebuild of the index
                         "Buffer Threshold value",
                         PINECONE_DEFAULT_BUFFER_THRESHOLD,
                         PINECONE_MIN_BUFFER_THRESHOLD,
@@ -493,10 +493,32 @@ void InsertBufferTuple(Relation index, Datum *values, bool *isnull, ItemPointer 
     UnlockReleaseBuffer(buf);
 }
 
+ItemPointerData id_get_heap_tid(char *id)
+{
+    ItemPointerData heap_tid;
+    sscanf(id, "%02hx%02hx%02hx", &heap_tid.ip_blkid.bi_hi, &heap_tid.ip_blkid.bi_lo, &heap_tid.ip_posid);
+    return heap_tid;
+}
 
 
-IndexBulkDeleteResult *no_bulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
-                                     IndexBulkDeleteCallback callback, void *callback_state) { return NULL; }
+IndexBulkDeleteResult *pinecone_bulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
+                                     IndexBulkDeleteCallback callback, void *callback_state)
+{
+    char* host = ReadMetaPage(info->index).host;
+    cJSON* ids_to_delete = cJSON_CreateArray();
+    // yikes! pinecone makes you read your ids sequentially in pages of 100, so vacuuming a large index is going to be impossible
+    cJSON* json_vectors = pinecone_list_vectors(pinecone_api_key, ReadMetaPage(info->index).host, 100, NULL);
+    cJSON* json_vector; // todo: do I need to be freeing all my cJSON objects?
+    elog(DEBUG1, "vacuuming json_vectors: %s", cJSON_Print(json_vectors));
+    cJSON_ArrayForEach(json_vector, json_vectors) {
+        char* id = cJSON_GetStringValue(cJSON_GetObjectItem(json_vector, "id"));
+        ItemPointerData heap_tid = id_get_heap_tid(id);
+        if (callback(&heap_tid, callback_state)) cJSON_AddItemToArray(ids_to_delete, cJSON_CreateString(id));
+    }
+    elog(DEBUG1, "deleting ids: %s", cJSON_Print(ids_to_delete));
+    pinecone_delete_vectors(pinecone_api_key, host, ids_to_delete);
+    return NULL;
+}
 
 IndexBulkDeleteResult *no_vacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats) { return NULL; }
 
@@ -830,7 +852,7 @@ Datum pineconehandler(PG_FUNCTION_ARGS)
     amroutine->ambuild = pinecone_build;
     amroutine->ambuildempty = pinecone_buildempty;
     amroutine->aminsert = pinecone_insert;
-    amroutine->ambulkdelete = no_bulkdelete;
+    amroutine->ambulkdelete = pinecone_bulkdelete;
     amroutine->amvacuumcleanup = no_vacuumcleanup;
     // used to indicate if we support index-only scans; takes a attno and returns a bool;
     // included cols should always return true since there is little point in an included column if it can't be returned
