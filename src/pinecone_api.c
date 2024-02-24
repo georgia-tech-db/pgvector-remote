@@ -33,11 +33,13 @@ void set_curl_options(CURL *hnd, const char *api_key, const char *url, const cha
     curl_easy_setopt(hnd, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(hnd, CURLOPT_CUSTOMREQUEST, method);
     curl_easy_setopt(hnd, CURLOPT_URL, url);
-    curl_easy_setopt(hnd, CURLOPT_WRITEDATA, response_data); // pass a pointer to the string pointer, so we can reassign it in the callback
+    curl_easy_setopt(hnd, CURLOPT_WRITEDATA, response_data);
     curl_easy_setopt(hnd, CURLOPT_WRITEFUNCTION, write_callback);
-    // curl_easy_setopt(hnd, CURLOPT_WRITEDATA, stdout);
 }
 
+/* https://docs.pinecone.io/reference/describe_index
+ * returns a json object with the index's metadata
+ */
 cJSON* describe_index(const char *api_key, const char *index_name) {
     CURL *hnd = curl_easy_init();
     cJSON *response_json;
@@ -49,15 +51,15 @@ cJSON* describe_index(const char *api_key, const char *index_name) {
     return response_json;
 }
 
-// name, dimension, metric
-// serverless: cloud, region
-// pod: environment, replicas, pod_type, pods, shards, metadata_config
-// the spec should just be passed as a string in json format. We don't need to worry about parsing it.
+/* name, dimension, metric
+ * serverless: cloud, region
+ * pod: environment, replicas, pod_type, pods, shards, metadata_config
+ * Refer to https://docs.pinecone.io/reference/create_index
+ */
 cJSON* create_index(const char *api_key, const char *index_name, const int dimension, const char *metric, const char *server_spec) {
     CURL *hnd = curl_easy_init();
     cJSON *body = cJSON_CreateObject();
-    cJSON *spec_json;
-    char *body_str;
+    cJSON *spec_json = cJSON_Parse(server_spec);
     char *response_data = NULL;
     cJSON *response_json;
     // add fields to body
@@ -65,34 +67,22 @@ cJSON* create_index(const char *api_key, const char *index_name, const int dimen
     cJSON_AddItemToObject(body, "name", cJSON_CreateString(index_name));
     cJSON_AddItemToObject(body, "dimension", cJSON_CreateNumber(dimension));
     cJSON_AddItemToObject(body, "metric", cJSON_CreateString(metric));
-    // add spec
-    spec_json = cJSON_Parse(server_spec);
     cJSON_AddItemToObject(body, "spec", spec_json);
-    // convert body to string
-    body_str = cJSON_Print(body);
-    elog(DEBUG1, "Body: %s", body_str);
     // set curl options
     set_curl_options(hnd, api_key, "https://api.pinecone.io/indexes", "POST", &response_data);
-    curl_easy_setopt(hnd, CURLOPT_POSTFIELDS, body_str);
+    curl_easy_setopt(hnd, CURLOPT_POSTFIELDS, cJSON_Print(body));
     curl_easy_perform(hnd);
-    // check if http return code is 422
-    // cleanup
     curl_easy_cleanup(hnd);
     // return response_data as json
     response_json = cJSON_Parse(response_data);
     return response_json;
 }
 
-// querying an index has many options
-// namespace, topK, filter, includeValues, includeMetadata, vector, sparseVector, id
-// Ultimately I might want to support index-only scans which means I would want to include metadata and values.
-// For the prototype, I don't have filtering, metadata so I just support topK and vector.
 cJSON* pinecone_api_query_index(const char *api_key, const char *index_host, const int topK, cJSON *query_vector_values, cJSON *filter) {
     char* response_data = NULL;
     CURL *hnd = curl_easy_init();
     cJSON *body = cJSON_CreateObject();
-    char url[100] = "https://"; strcat(url, index_host); strcat(url, "/query"); // https://t1-23kshha.svc.apw5-4e34-81fa.pinecone.io/query
-    // body has fields topK:topK (integer), vector:query_vector_values
+    char url[100] = "https://"; strcat(url, index_host); strcat(url, "/query"); // e.g. https://t1-23kshha.svc.apw5-4e34-81fa.pinecone.io/query
     cJSON_AddItemToObject(body, "topK", cJSON_CreateNumber(topK));
     cJSON_AddItemToObject(body, "vector", query_vector_values);
     cJSON_AddItemToObject(body, "filter", filter);
@@ -102,13 +92,9 @@ cJSON* pinecone_api_query_index(const char *api_key, const char *index_host, con
     set_curl_options(hnd, api_key, url, "POST", &response_data);
     curl_easy_setopt(hnd, CURLOPT_POSTFIELDS, cJSON_Print(body));
     curl_easy_perform(hnd);
-    // print response_buffer
     return cJSON_Parse(response_data);
 }
 
-// to insert vectors call the upsert endpoint
-// for now we don't worry about metadata
-// a vector has id:string and values:float[]
 void pinecone_bulk_upsert(const char *api_key, const char *index_host, cJSON *vectors, int batch_size) {
     cJSON *batches = batch_vectors(vectors, batch_size);
     cJSON *batch;
@@ -137,25 +123,16 @@ void pinecone_bulk_upsert(const char *api_key, const char *index_host, cJSON *ve
 
 
 CURL* get_pinecone_upsert_handle(const char *api_key, const char *index_host, cJSON *vectors) {
-    // char response_data[40960] = "";
     CURL *hnd = curl_easy_init();
-    // CURLcode ret;
     cJSON *body = cJSON_CreateObject();
     char *body_str;
     char *response_data = NULL;
-    // FILE *response_stream = fmemopen(response_data, sizeof(response_data), "w");
     char url[100] = "https://"; strcat(url, index_host); strcat(url, "/vectors/upsert"); // https://t1-23kshha.svc.apw5-4e34-81fa.pinecone.io/vectors/upsert
     cJSON_AddItemToObject(body, "vectors", vectors);
     set_curl_options(hnd, api_key, url, "POST", &response_data);
     body_str = cJSON_Print(body);
-    // curl_easy_setopt(hnd, CURLOPT_WRITEDATA, response_stream);
     curl_easy_setopt(hnd, CURLOPT_POSTFIELDS, body_str);
-    // set writeback
     return hnd;
-    // ret = curl_easy_perform(hnd);
-    // fflush(response_stream);
-    // elog(DEBUG1, "Response code: %d", ret);
-    // elog(DEBUG1, "Response data: %s", response_data);
 }
 
 
@@ -171,7 +148,7 @@ cJSON* batch_vectors(cJSON *vectors, int batch_size) {
             batch = cJSON_CreateArray();
             i = 0;
         }
-        cJSON_AddItemToArray(batch, cJSON_Duplicate(vector, true)); // todo: figure out why i have to deepcopy
+        cJSON_AddItemToArray(batch, cJSON_Duplicate(vector, true)); // todo: figure out why i have to deepcopy when using these macros
         i++;
     }
     cJSON_AddItemToArray(batches, batch);
