@@ -7,7 +7,7 @@
 typedef CURL** CURLHandleList;
 
 struct curl_slist *create_common_headers(const char *api_key);
-void set_curl_options(CURL *hnd, const char *api_key, const char *url, const char *method);
+void set_curl_options(CURL *hnd, const char *api_key, const char *url, const char *method, char** response_data);
 cJSON* describe_index(const char *api_key, const char *index_name);
 cJSON* create_index(const char *api_key, const char *index_name, const int dimension, const char *metric, const char *spec);
 cJSON* pinecone_api_query_index(const char *api_key, const char *index_host, const int topK, cJSON *query_vector_values, cJSON *filter);

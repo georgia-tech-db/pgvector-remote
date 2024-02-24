@@ -5,11 +5,18 @@
 #include "pinecone_api.h"
 #include "postgres.h"
 
-size_t write_callback(char *ptr, size_t size, size_t nmemb, void *userdata) {
-    // (void)userdata; // Unused
-    // fwrite(ptr, size, nmemb < 100 ? nmemb : 100, stdout);
-    elog(DEBUG1, "Curl Response: %s", ptr);
-    return size * nmemb;
+size_t write_callback(char *contents, size_t size, size_t nmemb, void *userdata) {
+    size_t real_size = size * nmemb; // size of the response
+    char **str = (char **)userdata; // cast the userdata to a string pointer
+    *str = malloc(real_size + 1); // allocate memory for the response
+    if (*str == NULL) {
+        ereport(ERROR, (errmsg("Failed to allocate memory for response")));
+        return 0;
+    }
+    memcpy(*str, contents, real_size);
+    (*str)[real_size] = '\0'; // null terminate the string
+    elog(DEBUG1, "Response (write_callback): %s", *str);
+    return real_size;
 }
 
 struct curl_slist *create_common_headers(const char *api_key) {
@@ -21,25 +28,23 @@ struct curl_slist *create_common_headers(const char *api_key) {
     return headers;
 }
 
-void set_curl_options(CURL *hnd, const char *api_key, const char *url, const char *method) {
+void set_curl_options(CURL *hnd, const char *api_key, const char *url, const char *method, char** response_data) {
     struct curl_slist *headers = create_common_headers(api_key);
     curl_easy_setopt(hnd, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(hnd, CURLOPT_CUSTOMREQUEST, method);
     curl_easy_setopt(hnd, CURLOPT_URL, url);
+    curl_easy_setopt(hnd, CURLOPT_WRITEDATA, response_data); // pass a pointer to the string pointer, so we can reassign it in the callback
+    curl_easy_setopt(hnd, CURLOPT_WRITEFUNCTION, write_callback);
     // curl_easy_setopt(hnd, CURLOPT_WRITEDATA, stdout);
 }
 
 cJSON* describe_index(const char *api_key, const char *index_name) {
     CURL *hnd = curl_easy_init();
     cJSON *response_json;
-    char response_data[40960] = "";
-    FILE *response_stream = fmemopen(response_data, sizeof(response_data), "w");
+    char *response_data = NULL;
     char url[100] = "https://api.pinecone.io/indexes/"; strcat(url, index_name);
-    set_curl_options(hnd, api_key, url, "GET");
-    curl_easy_setopt(hnd, CURLOPT_WRITEDATA, response_stream);
+    set_curl_options(hnd, api_key, url, "GET", &response_data);
     curl_easy_perform(hnd);
-    fflush(response_stream);
-    elog(DEBUG1, "Response data: %s", response_data);
     response_json = cJSON_Parse(response_data);
     return response_json;
 }
@@ -50,13 +55,11 @@ cJSON* describe_index(const char *api_key, const char *index_name) {
 // the spec should just be passed as a string in json format. We don't need to worry about parsing it.
 cJSON* create_index(const char *api_key, const char *index_name, const int dimension, const char *metric, const char *server_spec) {
     CURL *hnd = curl_easy_init();
-    CURLcode ret;
     cJSON *body = cJSON_CreateObject();
     cJSON *spec_json;
     char *body_str;
-    char response_data[4096] = "";
-    FILE *response_stream;
-    response_stream = fmemopen(response_data, sizeof(response_data), "w");
+    char *response_data = NULL;
+    cJSON *response_json;
     // add fields to body
     elog(DEBUG1, "Creating index %s with dimension %d and metric %s", index_name, dimension, metric);
     cJSON_AddItemToObject(body, "name", cJSON_CreateString(index_name));
@@ -69,19 +72,15 @@ cJSON* create_index(const char *api_key, const char *index_name, const int dimen
     body_str = cJSON_Print(body);
     elog(DEBUG1, "Body: %s", body_str);
     // set curl options
-    set_curl_options(hnd, api_key, "https://api.pinecone.io/indexes", "POST");
+    set_curl_options(hnd, api_key, "https://api.pinecone.io/indexes", "POST", &response_data);
     curl_easy_setopt(hnd, CURLOPT_POSTFIELDS, body_str);
-    curl_easy_setopt(hnd, CURLOPT_WRITEDATA, response_stream);
-    ret = curl_easy_perform(hnd);
-    fflush(response_stream);
+    curl_easy_perform(hnd);
     // check if http return code is 422
-    elog(DEBUG1, "Response code: %d", ret);
-    elog(DEBUG1, "Response data: %s", response_data);
     // cleanup
     curl_easy_cleanup(hnd);
-    fclose(response_stream);
     // return response_data as json
-    return cJSON_Parse(response_data);
+    response_json = cJSON_Parse(response_data);
+    return response_json;
 }
 
 // querying an index has many options
@@ -89,10 +88,8 @@ cJSON* create_index(const char *api_key, const char *index_name, const int dimen
 // Ultimately I might want to support index-only scans which means I would want to include metadata and values.
 // For the prototype, I don't have filtering, metadata so I just support topK and vector.
 cJSON* pinecone_api_query_index(const char *api_key, const char *index_host, const int topK, cJSON *query_vector_values, cJSON *filter) {
-    static char response_buffer[40000000]; // 40MB response buffer, this isn't nearly enough when we are returning 10000x1536 values which have to be read in json!!
-    FILE *stream = fmemopen(response_buffer, sizeof(response_buffer), "w");
+    char* response_data = NULL;
     CURL *hnd = curl_easy_init();
-    CURLcode ret;
     cJSON *body = cJSON_CreateObject();
     char url[100] = "https://"; strcat(url, index_host); strcat(url, "/query"); // https://t1-23kshha.svc.apw5-4e34-81fa.pinecone.io/query
     // body has fields topK:topK (integer), vector:query_vector_values
@@ -102,16 +99,11 @@ cJSON* pinecone_api_query_index(const char *api_key, const char *index_host, con
     cJSON_AddItemToObject(body, "includeValues", cJSON_CreateFalse());
     cJSON_AddItemToObject(body, "includeMetadata", cJSON_CreateFalse());
     elog(DEBUG1, "Querying index %s with payload: %s", index_host, cJSON_Print(body));
-    set_curl_options(hnd, api_key, url, "POST");
-    curl_easy_setopt(hnd, CURLOPT_WRITEDATA, stream);
+    set_curl_options(hnd, api_key, url, "POST", &response_data);
     curl_easy_setopt(hnd, CURLOPT_POSTFIELDS, cJSON_Print(body));
-    ret = curl_easy_perform(hnd);
-    // flush stream
-    fflush(stream);
-    elog(DEBUG1, "Response code: %d", ret);
-    elog(DEBUG1, "Response data: %s", response_buffer);
+    curl_easy_perform(hnd);
     // print response_buffer
-    return cJSON_Parse(response_buffer);
+    return cJSON_Parse(response_data);
 }
 
 // to insert vectors call the upsert endpoint
@@ -150,14 +142,14 @@ CURL* get_pinecone_upsert_handle(const char *api_key, const char *index_host, cJ
     // CURLcode ret;
     cJSON *body = cJSON_CreateObject();
     char *body_str;
+    char *response_data = NULL;
     // FILE *response_stream = fmemopen(response_data, sizeof(response_data), "w");
     char url[100] = "https://"; strcat(url, index_host); strcat(url, "/vectors/upsert"); // https://t1-23kshha.svc.apw5-4e34-81fa.pinecone.io/vectors/upsert
     cJSON_AddItemToObject(body, "vectors", vectors);
-    set_curl_options(hnd, api_key, url, "POST");
+    set_curl_options(hnd, api_key, url, "POST", &response_data);
     body_str = cJSON_Print(body);
     // curl_easy_setopt(hnd, CURLOPT_WRITEDATA, response_stream);
     curl_easy_setopt(hnd, CURLOPT_POSTFIELDS, body_str);
-    curl_easy_setopt(hnd, CURLOPT_WRITEFUNCTION, write_callback); // log the response
     // set writeback
     return hnd;
     // ret = curl_easy_perform(hnd);
@@ -165,6 +157,7 @@ CURL* get_pinecone_upsert_handle(const char *api_key, const char *index_host, cJ
     // elog(DEBUG1, "Response code: %d", ret);
     // elog(DEBUG1, "Response data: %s", response_data);
 }
+
 
 cJSON* batch_vectors(cJSON *vectors, int batch_size) {
     // given a list of e.g. 1000 vectors, batch them into groups of 100
