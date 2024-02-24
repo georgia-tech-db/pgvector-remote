@@ -101,13 +101,13 @@ CREATE FUNCTION vector_combine(double precision[], double precision[]) RETURNS d
 
 -- pinecone name functions
 
-CREATE FUNCTION vector_l2_pinecone_metric_name() RETURNS cstring
+CREATE FUNCTION vector_l2_pinecone_metric_name() RETURNS int4
 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION vector_ip_pinecone_metric_name() RETURNS cstring
+CREATE FUNCTION vector_ip_pinecone_metric_name() RETURNS int4
 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION vector_cosine_pinecone_metric_name() RETURNS cstring
+CREATE FUNCTION vector_cosine_pinecone_metric_name() RETURNS int4
 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- aggregates
