@@ -49,8 +49,8 @@ typedef struct PineconeOptions
     int         buffer_threshold; // threshold for the buffer before flushing to remote vector store.
 }			PineconeOptions;
 
-char *pinecone_api_key = NULL;
-int *pinecone_top_k = NULL;
+char* pinecone_api_key = NULL;
+int pinecone_top_k = 1000;
 // todo: principled batch sizes. Do we ever want the buffer to be bigger than a multi-insert? Possibly if we want to let the buffer fill up when the remote index is down.
 static relopt_kind pinecone_relopt_kind;
 
@@ -73,7 +73,7 @@ PineconeInit(void)
                               &pinecone_api_key, NULL, // todo: this should default to an empty string because it is easier to deal with Not Authorized errors than it is to deal with segfaults; get rid of validate_api_key
                               PGC_SUSET, // restrict to superusers, takes immediate effect and is not saved in the configuration file 
                               0, NULL, NULL, NULL);
-    DefineCustomIntVariable("pinecone.top_k", "topK parameter for pinecone queries", "topK parameter for pinecone queries. Default is 10000. Lowering this value may improve performance but you will not be able to retrieve more than this number of results",
+    DefineCustomIntVariable("pinecone.top_k", "Pinecone top k", "Pinecone top k",
                             &pinecone_top_k,
                             10000, 1, 10000,
                             PGC_USERSET,
@@ -572,7 +572,7 @@ pinecone_beginscan(Relation index, int nkeys, int norderbys)
 
     // prep sort
     // TODO allocate 10MB for the sort (we should actually need a lot less)
-    so->sortstate = tuplesort_begin_heap(so->tupdesc, 1, attNums, sortOperators, sortCollations, nullsFirstFlags, 10000, NULL, false);
+    so->sortstate = tuplesort_begin_heap(so->tupdesc, 1, attNums, sortOperators, sortCollations, nullsFirstFlags, pinecone_top_k, NULL, false);
     so->slot = MakeSingleTupleTableSlot(so->tupdesc, &TTSOpsMinimalTuple);
     //
     scan->opaque = so;

@@ -100,6 +100,7 @@ cJSON* index_tuple_get_pinecone_vector(Relation index, IndexTuple itup);
 cJSON* heap_tuple_get_pinecone_vector(Relation heap, HeapTuple htup);
 cJSON* tuple_get_pinecone_vector(TupleDesc tup_desc, Datum *values, bool *isnull, char *vector_id);
 
+extern char *pinecone_api_key;
 extern void validate_api_key(void);
 
 VectorMetric get_opclass_metric(Relation index);
