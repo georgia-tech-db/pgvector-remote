@@ -62,6 +62,7 @@ typedef struct PineconeBufferOpaqueData
 } PineconeBufferOpaqueData;
 typedef PineconeBufferOpaqueData *PineconeBufferOpaque;
 
+void generateRandomAlphanumeric(char *s, const int length);
 extern IndexBuildResult *pinecone_build(Relation heap, Relation index, IndexInfo *indexInfo);
 extern void no_buildempty(Relation index);
 extern bool pinecone_insert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heap, IndexUniqueCheck checkUnique

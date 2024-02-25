@@ -122,28 +122,60 @@ void validate_api_key(void) {
     }
 }
 
+void generateRandomAlphanumeric(char *s, const int length) {
+    char charset[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+    if (length) {
+        // Seed the random number generator
+        srand((unsigned int)time(NULL));
+        for (int i = 0; i < length; i++) {
+            int key = rand() % (int)(sizeof(charset) - 1);
+            *s++ = charset[key];
+        }
+        *s = '\0'; // Null-terminate the string
+    }
+}
+
 IndexBuildResult *pinecone_build(Relation heap, Relation index, IndexInfo *indexInfo)
 {
     cJSON *create_response;
     char *spec;
+    cJSON *spec_json;
     char *host;
     int dimensions;
     int buffer_threshold;
     int reltuples;
-    char *pinecone_index_name = (char *) palloc(100);
+    char pinecone_index_name[45]; // pinecone's maximum index name length is 45
+    int name_length;
     PineconeOptions *opts = (PineconeOptions *) index->rd_options;
     IndexBuildResult *result = palloc(sizeof(IndexBuildResult));
     PineconeBuildState buildstate;
     VectorMetric metric = get_opclass_metric(index);
     const char *pinecone_metric_name = vector_metric_to_pinecone_metric[metric];
+    char* index_name;
+    char random_postfix[5];
     dimensions = TupleDescAttr(index->rd_att, 0)->atttypmod;
     // create a pinecone_index_name like _pgvector_remote_{rd_id}
-    snprintf(pinecone_index_name, 100, "pgvector-remote-index-oid-%d", index->rd_id);
-    //
+    // log the index's name
+    elog(DEBUG1, "index name: %s", NameStr(index->rd_rel->relname));
+    // create the pinecone_index_name like pgvector-remote-{index_name}-{index_id}
+    index_name = NameStr(index->rd_rel->relname);
+    generateRandomAlphanumeric(random_postfix, 4);
+    name_length = snprintf(pinecone_index_name, sizeof(pinecone_index_name), "pgvector-%u-%s-%s", index->rd_id, index_name, random_postfix);
+    if (name_length >= sizeof(pinecone_index_name)) {
+        ereport(ERROR, (errcode(ERRCODE_NAME_TOO_LONG), errmsg("Pinecone index name too long"), errhint("The pinecone index name is %s... and is %d characters long. The maximum length is 45 characters.", pinecone_index_name, name_length)));
+    }
+    // check that all chars are alphanumeric or hyphen
+    for (int i = 0; i < name_length; i++) {
+        if (!isalnum(pinecone_index_name[i]) && pinecone_index_name[i] != '-') {
+            elog(DEBUG1, "Invalid character: %c", pinecone_index_name[i]);
+            ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("Pinecone index name contains invalid characters"), errhint("The pinecone index name can only contain alphanumeric characters and hyphens.")));
+        }
+    }
     spec = GET_STRING_RELOPTION(opts, spec);
+    spec_json = cJSON_Parse(spec);
     buffer_threshold = opts->buffer_threshold;
     validate_api_key();
-    create_response = create_index(pinecone_api_key, pinecone_index_name, dimensions, pinecone_metric_name, spec);
+    create_response = pinecone_create_index(pinecone_api_key, pinecone_index_name, dimensions, pinecone_metric_name, spec_json);
     host = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(create_response, "host"));
     CreateMetaPage(index, dimensions, host, pinecone_index_name, buffer_threshold, metric, MAIN_FORKNUM);
     // create buffer
@@ -507,6 +539,8 @@ IndexBulkDeleteResult *pinecone_bulkdelete(IndexVacuumInfo *info, IndexBulkDelet
     char* host = ReadMetaPage(info->index).host;
     cJSON* ids_to_delete = cJSON_CreateArray();
     // yikes! pinecone makes you read your ids sequentially in pages of 100, so vacuuming a large index is going to be impossible
+    // todo: and list isn't even supported on pod-based indexes, so actually it would make sense simply to 
+    // use /query to ask for 10K random ids and wait for them to be deleted.
     cJSON* json_vectors = pinecone_list_vectors(pinecone_api_key, ReadMetaPage(info->index).host, 100, NULL);
     cJSON* json_vector; // todo: do I need to be freeing all my cJSON objects?
     elog(DEBUG1, "vacuuming json_vectors: %s", cJSON_Print(json_vectors));

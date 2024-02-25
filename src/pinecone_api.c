@@ -99,37 +99,23 @@ cJSON* pinecone_delete_vectors(const char *api_key, const char *index_host, cJSO
     return generic_pinecone_request(api_key, url, "POST", request);
 }
 
+cJSON* pinecone_delete_index(const char *api_key, const char *index_name) {
+    char url[100] = "https://api.pinecone.io/indexes/"; strcat(url, index_name);
+    return generic_pinecone_request(api_key, url, "DELETE", NULL);
+}
+
 /* name, dimension, metric
  * serverless: cloud, region
  * pod: environment, replicas, pod_type, pods, shards, metadata_config
  * Refer to https://docs.pinecone.io/reference/create_index
  */
-cJSON* create_index(const char *api_key, const char *index_name, const int dimension, const char *metric, const char *server_spec) {
-    CURL *hnd = curl_easy_init();
-    cJSON *body = cJSON_CreateObject();
-    cJSON *spec_json = cJSON_Parse(server_spec);
-    ResponseData response_data = {NULL, 0};
-    cJSON *response_json;
-    CURLcode ret;
-    // add fields to body
-    elog(DEBUG1, "Creating index %s with dimension %d and metric %s", index_name, dimension, metric);
-    cJSON_AddItemToObject(body, "name", cJSON_CreateString(index_name));
-    cJSON_AddItemToObject(body, "dimension", cJSON_CreateNumber(dimension));
-    cJSON_AddItemToObject(body, "metric", cJSON_CreateString(metric));
-    cJSON_AddItemToObject(body, "spec", spec_json);
-    // set curl options
-    set_curl_options(hnd, api_key, "https://api.pinecone.io/indexes", "POST", &response_data);
-    curl_easy_setopt(hnd, CURLOPT_POSTFIELDS, cJSON_Print(body));
-    ret = curl_easy_perform(hnd);
-    if (ret != CURLE_OK) {
-        elog(ERROR, "curl_easy_perform() failed: %s\n", curl_easy_strerror(ret));
-    }
-    curl_easy_cleanup(hnd);
-    // return response_data as json
-    response_json = cJSON_Parse(response_data.data);
-    // print the response
-    elog(DEBUG1, "Response (create_index): %s", cJSON_Print(response_json));
-    return response_json;
+cJSON* pinecone_create_index(const char *api_key, const char *index_name, const int dimension, const char *metric, cJSON *spec) {
+    cJSON *request = cJSON_CreateObject();
+    cJSON_AddItemToObject(request, "name", cJSON_CreateString(index_name));
+    cJSON_AddItemToObject(request, "dimension", cJSON_CreateNumber(dimension));
+    cJSON_AddItemToObject(request, "metric", cJSON_CreateString(metric));
+    cJSON_AddItemToObject(request, "spec", spec);
+    return generic_pinecone_request(api_key, "https://api.pinecone.io/indexes", "POST", request);
 }
 
 cJSON* pinecone_api_query_index(const char *api_key, const char *index_host, const int topK, cJSON *query_vector_values, cJSON *filter) {

@@ -6,6 +6,9 @@
 #include "pinecone.h"
 #include "cJSON.h"
 #include "utils/builtins.h"
+#include "executor/spi.h"
+#include "fmgr.h"
+
 
 PGDLLEXPORT PG_FUNCTION_INFO_V1(pinecone_indexes);
 Datum
@@ -103,4 +106,72 @@ pinecone_indexes(PG_FUNCTION_ARGS) {
     rsinfo->setDesc = tupdesc;
     // when returning a set, we must return a null Datum
 	return (Datum) 0;
+}
+
+PGDLLEXPORT PG_FUNCTION_INFO_V1(pinecone_delete_unused_indexes);
+Datum
+pinecone_delete_unused_indexes(PG_FUNCTION_ARGS) {
+    cJSON *indexes;
+    cJSON *index;
+    int deleted = 0;
+    int ret;
+    char query[256];
+
+    // validate the api key
+    if (pinecone_api_key == NULL || strlen(pinecone_api_key) == 0) {
+        ereport(ERROR, (errmsg("Pinecone API key is not set")));
+    }
+
+    // validate indexes response
+    indexes = list_indexes(pinecone_api_key);
+    if (indexes == NULL || !cJSON_IsArray(indexes)) {
+        ereport(ERROR, (errmsg("Failed to list indexes. Got response: %s", cJSON_Print(indexes))));
+    } else if (cJSON_GetArraySize(indexes) == 0) {
+        elog(NOTICE, "No indexes in pinecone");
+    }
+
+    // delete each unused index
+    // todo: do this concurrently with multicurl
+    cJSON_ArrayForEach(index, indexes) {
+        cJSON* pinecone_index_name_json;
+        Oid index_oid;
+        char* pinecone_index_name;
+        bool unused = false;
+
+        // get the name of the index in pinecone
+        pinecone_index_name_json = cJSON_GetObjectItem(index, "name");
+        if (pinecone_index_name_json == NULL || !cJSON_IsString(pinecone_index_name_json)) {
+            ereport(ERROR, (errmsg("Index name is not a string")));
+        }
+        pinecone_index_name = cJSON_GetStringValue(pinecone_index_name_json);
+
+        // deform pinecone_index_name back into index_name, index_oid
+        // pinecone_index_name has format ("pgvector-%u-%s-%s", index->rd_id, index_name random_postfix)
+        if (sscanf(pinecone_index_name, "pgvector-%u-", &index_oid) != 1) {
+            ereport(ERROR, (errmsg("Failed to parse index name: %s", pinecone_index_name)));
+        }
+
+        // check if the index's oid exists in pg_class 
+        sprintf(query, "SELECT EXISTS( SELECT 1 FROM pg_class WHERE oid = '%u' AND relkind = 'i');", index_oid);
+        SPI_connect();
+        ret = SPI_execute(query, false, 0);
+        if (ret == SPI_OK_SELECT && SPI_processed > 0) {
+            TupleDesc tupdesc = SPI_tuptable->tupdesc;
+            SPITupleTable *tuptable = SPI_tuptable;
+            HeapTuple tuple = tuptable->vals[0];
+            bool isnull;
+            Datum datum = heap_getattr(tuple, 1, tupdesc, &isnull);
+            elog(NOTICE, "Got result: %d", DatumGetBool(datum));
+            if (!isnull && DatumGetBool(datum) == false) {
+                unused = true;
+            }
+        } else {
+            elog(ERROR, "Failed to execute query");
+        }
+        SPI_finish();
+
+        // delete the index
+        if (unused) pinecone_delete_index(pinecone_api_key, pinecone_index_name);
+    }
+    PG_RETURN_INT32(deleted);
 }
