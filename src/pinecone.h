@@ -43,6 +43,11 @@ typedef PineconeScanOpaqueData *PineconeScanOpaque;
 
 extern const char* vector_metric_to_pinecone_metric[VECTOR_METRIC_COUNT];
 
+typedef struct PineconeCheckpoint {
+    BlockNumber page;
+    ItemIdData representative_vector_heap_tid;
+} PineconeCheckpoint;
+
 typedef struct PineconeMetaPageData
 {
     int dimensions;
@@ -51,7 +56,17 @@ typedef struct PineconeMetaPageData
     char host[100];
     char pinecone_index_name[60];
     VectorMetric metric;
+
+    BlockNumber pinecone_known_live_page;
+    BlockNumber pinecone_page;
+    BlockNumber insert_page;
+    int n_tuples;
+    int n_pinecone_tuples;
+    int n_pinecone_live_tuples;
+
+    PineconeCheckpoint checkpoints[20];
 } PineconeMetaPageData;
+
 typedef PineconeMetaPageData *PineconeMetaPage;
 
 typedef struct PineconeBufferOpaqueData
@@ -70,6 +85,9 @@ extern bool pinecone_insert(Relation index, Datum *values, bool *isnull, ItemPoi
                             , bool indexUnchanged
 #endif
                             , IndexInfo *indexInfo);
+
+ItemPointerData pinecone_id_get_heap_tid(char *id);
+char* pinecone_id_from_heap_tid(ItemPointerData heap_tid);
 extern IndexBulkDeleteResult *pinecone_bulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats, IndexBulkDeleteCallback callback, void *callback_state);
 extern IndexBulkDeleteResult *no_vacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats);
 extern void no_costestimate(PlannerInfo *root, IndexPath *path, double loop_count, Cost *indexStartupCost, Cost *indexTotalCost, Selectivity *indexSelectivity, double *indexCorrelation, double *indexPages);
@@ -84,7 +102,7 @@ ItemPointerData id_get_heap_tid(char *id);
 
 // void CreateMetaPage(Relation index, int dimensions, int lists, int forkNum)
 extern void pinecone_buildempty(Relation index);
-extern void CreateMetaPage(Relation index, int dimensions, char *host, char *pinecone_index_name, int buffer_threshold, VectorMetric metric, int forkNum);
+extern void CreateMetaPage(Relation index, int dimensions, char *host, char *pinecone_index_name,  VectorMetric metric, int forkNum);
 extern void CreateBufferHead(Relation index, int forkNum);
 extern PineconeMetaPageData ReadMetaPage(Relation index);
 void		PineconeInit(void);
@@ -104,6 +122,8 @@ cJSON* tuple_get_pinecone_vector(TupleDesc tup_desc, Datum *values, bool *isnull
 
 extern char *pinecone_api_key;
 extern void validate_api_key(void);
+void pinecone_spec_validator(const char *spec);
+void check_vector_nonzero(Vector *vector);
 
 VectorMetric get_opclass_metric(Relation index);
 #endif /* PINECONE_INDEX_AM_H */
