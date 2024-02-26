@@ -16,6 +16,19 @@
 #define PINECONE_MIN_BUFFER_THRESHOLD 1
 #define PINECONE_MAX_BUFFER_THRESHOLD 10000
 
+#define PINECONE_STATIC_METAPAGE_BLKNO 0
+#define PINECONE_BUFFER_METAPAGE_BLKNO 1
+#define PINECONE_BUFFER_HEAD_BLKNO 2
+
+#define PineconePageGetOpaque(page)	((PineconeBufferOpaque) PageGetSpecialPointer(page))
+#define PineconePageGetStaticMeta(page)	((PineconeStaticMetaPage) PageGetContents(page))
+#define PineconePageGetBufferMeta(page)    ((PineconeBufferMetaPage) PageGetContents(page))
+
+#define PINECONE_N_CHECKPOINTS 10
+
+#define PINECONE_INSERTION_LOCK_IDENTIFIER 1969841813 // random number, uniquely identifies the pinecone insertion lock
+
+
 
 // structs
 typedef struct PineconeScanOpaqueData
@@ -45,18 +58,21 @@ extern const char* vector_metric_to_pinecone_metric[VECTOR_METRIC_COUNT];
 
 typedef struct PineconeCheckpoint {
     BlockNumber page;
-    ItemIdData representative_vector_heap_tid;
+    ItemPointerData representative_tid;
 } PineconeCheckpoint;
 
-typedef struct PineconeMetaPageData
+typedef struct PineconeStaticMetaPageData
 {
     int dimensions;
-    int buffer_fullness;
-    int buffer_threshold;
     char host[100];
     char pinecone_index_name[60];
     VectorMetric metric;
+} PineconeStaticMetaPageData;
+typedef PineconeStaticMetaPageData *PineconeStaticMetaPage;
 
+
+typedef struct PineconeBufferMetaPageData
+{
     BlockNumber pinecone_known_live_page;
     BlockNumber pinecone_page;
     BlockNumber insert_page;
@@ -64,10 +80,14 @@ typedef struct PineconeMetaPageData
     int n_pinecone_tuples;
     int n_pinecone_live_tuples;
 
-    PineconeCheckpoint checkpoints[20];
-} PineconeMetaPageData;
+    BlockNumber latest_head_checkpoint;
+    int n_latest_head_checkpoint;
 
-typedef PineconeMetaPageData *PineconeMetaPage;
+    PineconeCheckpoint checkpoints[PINECONE_N_CHECKPOINTS];
+} PineconeBufferMetaPageData;
+typedef PineconeBufferMetaPageData *PineconeBufferMetaPage;
+
+
 
 typedef struct PineconeBufferOpaqueData
 {
@@ -104,7 +124,7 @@ ItemPointerData id_get_heap_tid(char *id);
 extern void pinecone_buildempty(Relation index);
 extern void CreateMetaPage(Relation index, int dimensions, char *host, char *pinecone_index_name,  VectorMetric metric, int forkNum);
 extern void CreateBufferHead(Relation index, int forkNum);
-extern PineconeMetaPageData ReadMetaPage(Relation index);
+extern PineconeStaticMetaPageData ReadStaticMetaPage(Relation index);
 void		PineconeInit(void);
 PGDLLEXPORT Datum pineconehandler(PG_FUNCTION_ARGS);
 
