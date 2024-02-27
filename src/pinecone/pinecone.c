@@ -491,7 +491,7 @@ void set_pinecone_page(Relation index, BlockNumber page, int n_new_tuples, ItemP
     GenericXLogFinish(state);
 }
 
-void check_vector_nonzero(Vector* vector) {
+void validate_vector_nonzero(Vector* vector) {
     if (vector_eq_zero_internal(vector)) {
         ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                         errmsg("Invalid vector: zero vector"),
@@ -506,7 +506,7 @@ cJSON* tuple_get_pinecone_vector(TupleDesc tup_desc, Datum *values, bool *isnull
     Vector *vector;
     cJSON *json_values;
     vector = DatumGetVector(values[0]);
-    check_vector_nonzero(vector);
+    validate_vector_nonzero(vector);
     json_values = cJSON_CreateFloatArray(vector->x, vector->dim);
     // prepare metadata
     for (int i = 0; i < tup_desc->natts; i++)

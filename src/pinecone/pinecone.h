@@ -21,14 +21,16 @@
 #define PINECONE_BUFFER_METAPAGE_BLKNO 1
 #define PINECONE_BUFFER_HEAD_BLKNO 2
 
-#define PineconePageGetOpaque(page)	((PineconeBufferOpaque) PageGetSpecialPointer(page))
-#define PineconePageGetStaticMeta(page)	((PineconeStaticMetaPage) PageGetContents(page))
-#define PineconePageGetBufferMeta(page)    ((PineconeBufferMetaPage) PageGetContents(page))
-
 #define PINECONE_N_CHECKPOINTS 10
 
 #define PINECONE_INSERTION_LOCK_IDENTIFIER 1969841813 // random number, uniquely identifies the pinecone insertion lock
 
+
+#define PineconePageGetOpaque(page)	((PineconeBufferOpaque) PageGetSpecialPointer(page))
+#define PineconePageGetStaticMeta(page)	((PineconeStaticMetaPage) PageGetContents(page))
+#define PineconePageGetBufferMeta(page)    ((PineconeBufferMetaPage) PageGetContents(page))
+
+// structs
 typedef struct PineconeScanOpaqueData
 {
     int dimensions;
@@ -117,14 +119,11 @@ extern int pinecone_max_buffer_scan;
 #define PINECONE_BATCH_SIZE pinecone_vectors_per_request * pinecone_concurrent_requests
 
 // function declarations
+Datum pineconehandler(PG_FUNCTION_ARGS); // handler
 
-
-void pinecone_spec_validator(const char *spec);
-
-void PineconeInit(void);
-VectorMetric get_opclass_metric(Relation index);
-void validate_api_key(void);
+// build
 void generateRandomAlphanumeric(char *s, const int length);
+void PineconeInit(void);
 char* get_pinecone_index_name(Relation index);
 IndexBuildResult *pinecone_build(Relation heap, Relation index, IndexInfo *indexInfo);
 char* CreatePineconeIndexAndWait(Relation index, cJSON* spec_json, VectorMetric metric, char* pinecone_index_name, int dimensions);
@@ -132,44 +131,62 @@ void InsertBaseTable(Relation heap, Relation index, IndexInfo *indexInfo, char* 
 void pinecone_build_callback(Relation index, ItemPointer tid, Datum *values, bool *isnull, bool tupleIsAlive, void *state);
 void no_buildempty(Relation index); // for some reason this is never called even when the base table is empty
 void InitIndexPages(Relation index, VectorMetric metric, int dimensions, char *pinecone_index_name, char *host, int forkNum);
-PineconeStaticMetaPageData GetStaticMetaPageData(Relation index);
 void pinecone_buildempty(Relation index);
+VectorMetric get_opclass_metric(Relation index);
+
+// insert
+bool AppendBufferTupleInCtx(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heapRel, IndexUniqueCheck checkUnique, IndexInfo *indexInfo);
+void PineconePageInit(Page page, Size pageSize);
+bool AppendBufferTuple(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heapRel);
 bool pinecone_insert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid,
                      Relation heap, IndexUniqueCheck checkUnique, 
 #if PG_VERSION_NUM >= 140000
                      bool indexUnchanged, 
 #endif
                      IndexInfo *indexInfo);
-void AdvancePineconeTail(Relation index);
-cJSON* get_fetch_ids(PineconeBufferMetaPageData buffer_meta);
-void AdvanceLivenessTail(Relation index, cJSON* fetched_ids);
-void set_pinecone_page(Relation index, BlockNumber page, int n_new_tuples, ItemPointerData representative_vector_heap_tid);
-void check_vector_nonzero(Vector* vector);
-cJSON* tuple_get_pinecone_vector(TupleDesc tup_desc, Datum *values, bool *isnull, char *vector_id);
-cJSON* index_tuple_get_pinecone_vector(Relation index, IndexTuple itup);
-bool AppendBufferTupleInCtx(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heapRel, IndexUniqueCheck checkUnique, IndexInfo *indexInfo);
-void PineconePageInit(Page page, Size pageSize);
-bool AppendBufferTuple(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heapRel);
-PineconeStaticMetaPageData PineconeSnapshotStaticMeta(Relation index);
-PineconeBufferMetaPageData PineconeSnapshotBufferMeta(Relation index);
-ItemPointerData pinecone_id_get_heap_tid(char *id);
-char* pinecone_id_from_heap_tid(ItemPointerData heap_tid);
-IndexBulkDeleteResult *pinecone_bulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
-                                     IndexBulkDeleteCallback callback, void *callback_state);
-IndexBulkDeleteResult *no_vacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats);
-void no_costestimate(PlannerInfo *root, IndexPath *path, double loop_count,
-					Cost *indexStartupCost, Cost *indexTotalCost,
-					Selectivity *indexSelectivity, double *indexCorrelation,
-					double *indexPages);
-bytea * pinecone_options(Datum reloptions, bool validate);
-bool no_validate(Oid opclassoid);
+
+// scan
 IndexScanDesc pinecone_beginscan(Relation index, int nkeys, int norderbys);
 cJSON* pinecone_build_filter(Relation index, ScanKey keys, int nkeys);
 void pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int norderbys);
 void load_buffer_into_sort(Relation index, PineconeScanOpaque so, Datum query_datum, TupleDesc index_tupdesc);
 bool pinecone_gettuple(IndexScanDesc scan, ScanDirection dir);
 void no_endscan(IndexScanDesc scan);
-Datum pineconehandler(PG_FUNCTION_ARGS);
+
+// liveness_tail
+void AdvancePineconeTail(Relation index);
+cJSON* get_fetch_ids(PineconeBufferMetaPageData buffer_meta);
+void AdvanceLivenessTail(Relation index, cJSON* fetched_ids);
+
+// vacuum
+IndexBulkDeleteResult *pinecone_bulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
+                                     IndexBulkDeleteCallback callback, void *callback_state);
+IndexBulkDeleteResult *no_vacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats);
+
+// validate
+void pinecone_spec_validator(const char *spec);
+void validate_api_key(void);
+void validate_vector_nonzero(Vector* vector);
+bytea * pinecone_options(Datum reloptions, bool validate);
+bool no_validate(Oid opclassoid);
+
+// converting between postgres tuples and json vectors
+cJSON* tuple_get_pinecone_vector(TupleDesc tup_desc, Datum *values, bool *isnull, char *vector_id);
+cJSON* index_tuple_get_pinecone_vector(Relation index, IndexTuple itup);
+char* pinecone_id_from_heap_tid(ItemPointerData heap_tid);
+ItemPointerData pinecone_id_get_heap_tid(char *id);
+
+// read and write meta pages
+PineconeStaticMetaPageData GetStaticMetaPageData(Relation index);
+PineconeStaticMetaPageData PineconeSnapshotStaticMeta(Relation index);
+PineconeBufferMetaPageData PineconeSnapshotBufferMeta(Relation index);
+void set_pinecone_page(Relation index, BlockNumber page, int n_new_tuples, ItemPointerData representative_vector_heap_tid);
+
+// misc.
+void no_costestimate(PlannerInfo *root, IndexPath *path, double loop_count,
+					Cost *indexStartupCost, Cost *indexTotalCost,
+					Selectivity *indexSelectivity, double *indexCorrelation,
+					double *indexPages);
 
 
 #endif // PINECONE_INDEX_AM_H
