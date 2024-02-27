@@ -38,25 +38,16 @@ const char* vector_metric_to_pinecone_metric[VECTOR_METRIC_COUNT] = {
     "dotproduct"
 };
 
-typedef struct PineconeOptions
-{
-	int32		vl_len_;		/* varlena header (do not touch directly!) */
-    int         spec; // spec is a string; this is its offset in the rd_options
-}			PineconeOptions;
-
 char* pinecone_api_key = NULL;
 int pinecone_top_k = 1000;
 int pinecone_vectors_per_request = 100;
 int pinecone_concurrent_requests = 20;
 int pinecone_max_buffer_scan = 10000; // maximum number of tuples to search in the buffer
-#define PINECONE_BATCH_SIZE pinecone_vectors_per_request * pinecone_concurrent_requests
 
 // todo: principled batch sizes. Do we ever want the buffer to be bigger than a multi-insert? Possibly if we want to let the buffer fill up when the remote index is down.
 static relopt_kind pinecone_relopt_kind;
 
-
-void
-pinecone_spec_validator(const char *spec)
+void pinecone_spec_validator(const char *spec)
 {
     bool empty = strcmp(spec, "") == 0;
     if (empty || cJSON_Parse(spec) == NULL)
@@ -69,8 +60,7 @@ pinecone_spec_validator(const char *spec)
     }
 }
 
-void
-PineconeInit(void)
+void PineconeInit(void)
 {
     pinecone_relopt_kind = add_reloption_kind();
     add_string_reloption(pinecone_relopt_kind, "spec",
@@ -107,22 +97,13 @@ PineconeInit(void)
     MarkGUCPrefixReserved("pinecone");
 }
 
-VectorMetric
-get_opclass_metric(Relation index)
+VectorMetric get_opclass_metric(Relation index)
 {
     FmgrInfo *procinfo = index_getprocinfo(index, 1, 2); // lookup the second support function in the opclass for the first attribute
     Oid collation = index->rd_indcollation[0]; // get the collation of the first attribute
     Datum datum = FunctionCall0Coll(procinfo, collation); // call the support function
     return (VectorMetric) DatumGetInt32(datum);
 }
-
-
-typedef struct PineconeBuildState
-{
-    int64 indtuples; // total number of tuples indexed
-    cJSON *json_vectors; // array of json vectors
-    char host[100]; // the remote index's hostname
-} PineconeBuildState;
 
 
 void validate_api_key(void) {
@@ -193,7 +174,7 @@ IndexBuildResult *pinecone_build(Relation heap, Relation index, IndexInfo *index
 
 char* CreatePineconeIndexAndWait(Relation index, cJSON* spec_json, VectorMetric metric, char* pinecone_index_name, int dimensions) {
     char* host = palloc(100);
-    char* pinecone_metric_name = vector_metric_to_pinecone_metric[metric];
+    const char* pinecone_metric_name = vector_metric_to_pinecone_metric[metric];
     cJSON* create_response = pinecone_create_index(pinecone_api_key, pinecone_index_name, dimensions, pinecone_metric_name, spec_json);
     host = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(create_response, "host"));
     // now we wait until the pinecone index is done initializing
@@ -222,7 +203,7 @@ void InsertBaseTable(Relation heap, Relation index, IndexInfo *indexInfo, char* 
     // iterate through the base table and upsert the vectors to the remote index
     reltuples = table_index_build_scan(heap, index, indexInfo, true, true, pinecone_build_callback, (void *) &buildstate, NULL);
     if (cJSON_GetArraySize(buildstate.json_vectors) > 0) {
-        pinecone_bulk_upsert(pinecone_api_key, host, buildstate.json_vectors, pinecone_vectors_per_request);
+        pinecone_bulk_upsert_with_fetch(pinecone_api_key, host, buildstate.json_vectors, pinecone_vectors_per_request, false, NULL);
     }
     cJSON_Delete(buildstate.json_vectors);
     // stats
@@ -230,8 +211,7 @@ void InsertBaseTable(Relation heap, Relation index, IndexInfo *indexInfo, char* 
     result->index_tuples = buildstate.indtuples;
 }
 
-static void
-pinecone_build_callback(Relation index, ItemPointer tid, Datum *values, bool *isnull, bool tupleIsAlive, void *state)
+void pinecone_build_callback(Relation index, ItemPointer tid, Datum *values, bool *isnull, bool tupleIsAlive, void *state)
 {
     PineconeBuildState *buildstate = (PineconeBuildState *) state;
     TupleDesc itup_desc = index->rd_att;
@@ -240,7 +220,7 @@ pinecone_build_callback(Relation index, ItemPointer tid, Datum *values, bool *is
     json_vector = tuple_get_pinecone_vector(itup_desc, values, isnull, pinecone_id);
     cJSON_AddItemToArray(buildstate->json_vectors, json_vector);
     if (cJSON_GetArraySize(buildstate->json_vectors) >= PINECONE_BATCH_SIZE) {
-        pinecone_bulk_upsert(pinecone_api_key, buildstate->host, buildstate->json_vectors, pinecone_vectors_per_request);
+        pinecone_bulk_upsert_with_fetch(pinecone_api_key, buildstate->host, buildstate->json_vectors, pinecone_vectors_per_request, false, NULL);
         cJSON_Delete(buildstate->json_vectors);
         buildstate->json_vectors = cJSON_CreateArray();
     }
@@ -274,10 +254,10 @@ void InitIndexPages(Relation index, VectorMetric metric, int dimensions, char *p
     pinecone_static_meta_page->dimensions = dimensions;
     // copy host and pinecone_index_name, checking for length
     if (strlcpy(pinecone_static_meta_page->host, host, sizeof((PineconeStaticMetaPage) 0)) >= sizeof((PineconeStaticMetaPage) 0)) {
-        ereport(ERROR, (errcode(ERRCODE_NAME_TOO_LONG), errmsg("Host name too long"), errhint("The host name is %s... and is %d characters long. The maximum length is %d characters.", host, strlen(host), sizeof(pinecone_static_meta_page->host))));
+        ereport(ERROR, (errcode(ERRCODE_NAME_TOO_LONG), errmsg("Host name too long"), errhint("The host name is %s... and is %d characters long. The maximum length is %d characters.", host, (int) strlen(host), (int) sizeof(pinecone_static_meta_page->host))));
     }
     if (strlcpy(pinecone_static_meta_page->pinecone_index_name, pinecone_index_name, sizeof((PineconeStaticMetaPage) 0)) >= sizeof((PineconeStaticMetaPage) 0)) {
-        ereport(ERROR, (errcode(ERRCODE_NAME_TOO_LONG), errmsg("Pinecone index name too long"), errhint("The pinecone index name is %s... and is %d characters long. The maximum length is %d characters.", pinecone_index_name, strlen(pinecone_index_name), sizeof(pinecone_static_meta_page->pinecone_index_name))));
+        ereport(ERROR, (errcode(ERRCODE_NAME_TOO_LONG), errmsg("Pinecone index name too long"), errhint("The pinecone index name is %s... and is %d characters long. The maximum length is %d characters.", pinecone_index_name, (int) strlen(pinecone_index_name), (int) sizeof(pinecone_static_meta_page->pinecone_index_name))));
     }
 
     // CREATE THE BUFFER META PAGE
@@ -329,17 +309,14 @@ PineconeStaticMetaPageData GetStaticMetaPageData(Relation index) {
 void pinecone_buildempty(Relation index) {}
 
 
-
 /*
  * Insert a tuple into the index
  */
 bool pinecone_insert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid,
-                     Relation heap, IndexUniqueCheck checkUnique
+                     Relation heap, IndexUniqueCheck checkUnique, 
 #if PG_VERSION_NUM >= 140000
-                     ,
-                     bool indexUnchanged
+                     bool indexUnchanged, 
 #endif
-                     ,
                      IndexInfo *indexInfo)
 {
     bool checkpoint_created;
@@ -365,21 +342,23 @@ void AdvancePineconeTail(Relation index)
     Page page;
     BlockNumber currentblkno = PINECONE_BUFFER_HEAD_BLKNO;
     cJSON* json_vectors = cJSON_CreateArray();
+    bool success;
+
+    // take a snapshot of the buffer meta
+    // we don't need to worry about another transaction advancing the pinecone tail because we have the pinecone insertion lock
+    PineconeStaticMetaPageData static_meta = PineconeSnapshotStaticMeta(index);
+    PineconeBufferMetaPageData buffer_meta = PineconeSnapshotBufferMeta(index);
 
     // acquire the pinecone insertion lock
     LOCKTAG pinecone_insertion_lock;
     SET_LOCKTAG_ADVISORY(pinecone_insertion_lock, MyDatabaseId, (uint32) index->rd_id, PINECONE_INSERTION_LOCK_IDENTIFIER, 0);
-    bool success = LockAcquire(&pinecone_insertion_lock, ExclusiveLock, false, true);
+    success = LockAcquire(&pinecone_insertion_lock, ExclusiveLock, false, true);
     if (!success) {
         ereport(NOTICE, (errcode(ERRCODE_LOCK_NOT_AVAILABLE),
                         errmsg("Pinecone insertion lock not available"),
                         errhint("The pinecone insertion lock is currently held by another transaction. This is likely because the buffer is being advanced.")));
         return;
     }
-
-    // take a snapshot of the buffer meta
-    // we don't need to worry about another transaction advancing the pinecone tail because we have the pinecone insertion lock
-    PineconeBufferMetaPageData buffer_meta = PineconeSnapshotBufferMeta(index);
 
     // if the liveness tail is behind by more than PINECONE_N_CHECKPOINTS, abort
     if (buffer_meta.checkpoints[PINECONE_N_CHECKPOINTS - 1].page != InvalidBlockNumber) {
@@ -402,13 +381,14 @@ void AdvancePineconeTail(Relation index)
     // iterate through the pages
     while (true)
     {
-        IndexTuple itup;
+        IndexTuple itup = NULL;
 
         // Add all tuples on the page.
         for (int i = 1; i <= PageGetMaxOffsetNumber(page); i++)
         {
+            cJSON* json_vector;
             itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, i));
-            cJSON *json_vector = index_tuple_get_pinecone_vector(index, itup);
+            json_vector = index_tuple_get_pinecone_vector(index, itup);
             cJSON_AddItemToArray(json_vectors, json_vector);
         }
 
@@ -425,7 +405,14 @@ void AdvancePineconeTail(Relation index)
 
         // If we have enough vectors, push them to the remote index and update the pinecone checkpoint
         if (cJSON_GetArraySize(json_vectors) >= PINECONE_BATCH_SIZE) {
-            pinecone_bulk_upsert(pinecone_api_key, ReadStaticMetaPage(index).host, json_vectors, pinecone_vectors_per_request);
+            cJSON* fetched_ids;
+            cJSON* fetch_ids;
+            fetch_ids = get_fetch_ids(buffer_meta);
+            fetched_ids = pinecone_bulk_upsert_with_fetch(pinecone_api_key, static_meta.host, json_vectors, pinecone_vectors_per_request, true, fetch_ids);
+
+            // advance the liveness tail if any of the fetched_checkpoints are still checkpoints
+            AdvanceLivenessTail(index, fetched_ids);
+
             // update the pinecone page and make a new checkpoint
             set_pinecone_page(index, currentblkno, cJSON_GetArraySize(json_vectors), itup->t_tid);
             // free
@@ -438,6 +425,43 @@ void AdvancePineconeTail(Relation index)
 
     // release the lock
     LockRelease(&pinecone_insertion_lock, ExclusiveLock, false);
+}
+
+cJSON* get_fetch_ids(PineconeBufferMetaPageData buffer_meta) {
+    cJSON* fetch_ids = cJSON_CreateArray();
+    // TODO
+    // iter thru buffer_meta.checkpoints and push pinecone_id_from_heap_tid(representative_vector_tid) to fetch tids
+
+    return fetch_ids;
+}
+
+void AdvanceLivenessTail(Relation index, cJSON* fetched_ids) {
+    Page buffer_meta_page;
+    PineconeBufferMetaPage buffer_meta;
+    Buffer buffer_meta_buf = ReadBuffer(index, PINECONE_BUFFER_METAPAGE_BLKNO);
+    GenericXLogState* state = GenericXLogStart(index);
+    // get Buffer's MetaPage
+    LockBuffer(buffer_meta_buf, BUFFER_LOCK_EXCLUSIVE);
+    buffer_meta_page = GenericXLogRegisterBuffer(state, buffer_meta_buf, 0); 
+    buffer_meta = PineconePageGetBufferMeta(buffer_meta_page);
+    // search backwards through buffer_meta.checkpoints
+    // if any of the checkpoint.representative_tid are in the fetched_ids
+    // set this as the new pinecone_known_live_page and move back the list to make this the first checkpoint
+    for (int i = PINECONE_N_CHECKPOINTS - 1; i >= 0; i--) {
+        // TODO: this is an array not an object
+        if (cJSON_IsString(cJSON_GetObjectItem(fetched_ids, pinecone_id_from_heap_tid(buffer_meta->checkpoints[i].representative_tid)))) {
+            buffer_meta->pinecone_known_live_page = buffer_meta->checkpoints[i].page;
+            // move back the list to make this the first checkpoint
+            for (int j = i; j > 0; j--) {
+                buffer_meta->checkpoints[j] = buffer_meta->checkpoints[j - 1];
+            }
+            buffer_meta->checkpoints[0].page = InvalidBlockNumber;
+            break;
+        }
+    }
+    // save
+    UnlockReleaseBuffer(buffer_meta_buf);
+    GenericXLogFinish(state);
 }
 
 // todo: we don't really want to have specific functions for each modification
@@ -514,7 +538,6 @@ cJSON* index_tuple_get_pinecone_vector(Relation index, IndexTuple itup) {
     return tuple_get_pinecone_vector(itup_desc, itup_values, itup_isnull, vector_id);
 }
 
-
 bool AppendBufferTupleInCtx(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heapRel, IndexUniqueCheck checkUnique, IndexInfo *indexInfo)
 {
     MemoryContext oldCtx;
@@ -531,7 +554,7 @@ bool AppendBufferTupleInCtx(Relation index, Datum *values, bool *isnull, ItemPoi
     return newpage;
 }
 
-PineconePageInit(Page page, Size pageSize)
+void PineconePageInit(Page page, Size pageSize)
 {
     PageInit(page, pageSize, sizeof(PineconeBufferOpaqueData));
     PineconePageGetOpaque(page)->nextblkno = InvalidBlockNumber;
@@ -545,7 +568,7 @@ bool AppendBufferTuple(Relation index, Datum *values, bool *isnull, ItemPointer 
 {
     IndexTuple itup;
     GenericXLogState *state;
-    Buffer buffer_meta_buf, insert_buf, newbuf;
+    Buffer buffer_meta_buf, insert_buf, newbuf = InvalidBuffer;
     Page buffer_meta_page, insert_page, newpage;
     PineconeBufferMetaPage buffer_meta;
     Size itemsz;
@@ -622,18 +645,20 @@ bool AppendBufferTuple(Relation index, Datum *values, bool *isnull, ItemPointer 
     GenericXLogFinish(state);
     UnlockReleaseBuffer(insert_buf);
     UnlockReleaseBuffer(buffer_meta_buf);
+    if (success) {
+        // todo: check page add item success
+    }
     if (full) {
         UnlockReleaseBuffer(newbuf);
     }
     return checkpoint_created;
 }
 
-PineconeStaticMetaPageData
-PineconeSnapshotStaticMeta(Relation index)
+PineconeStaticMetaPageData PineconeSnapshotStaticMeta(Relation index)
 {
     Buffer buf;
     Page page;
-    PineconeStaticMetaPage *metap;
+    PineconeStaticMetaPage metap;
     buf = ReadBuffer(index, PINECONE_STATIC_METAPAGE_BLKNO);
     LockBuffer(buf, BUFFER_LOCK_SHARE);
     page = BufferGetPage(buf);
@@ -642,12 +667,11 @@ PineconeSnapshotStaticMeta(Relation index)
     return *metap;
 }
 
-PineconeBufferMetaPageData
-PineconeSnapshotBufferMeta(Relation index)
+PineconeBufferMetaPageData PineconeSnapshotBufferMeta(Relation index)
 {
     Buffer buf;
     Page page;
-    PineconeBufferMetaPage *metap;
+    PineconeBufferMetaPage metap;
     buf = ReadBuffer(index, PINECONE_BUFFER_METAPAGE_BLKNO);
     LockBuffer(buf, BUFFER_LOCK_SHARE);
     page = BufferGetPage(buf);
@@ -656,8 +680,6 @@ PineconeSnapshotBufferMeta(Relation index)
     return *metap;
 }
     
-
-
 ItemPointerData pinecone_id_get_heap_tid(char *id)
 {
     ItemPointerData heap_tid;
@@ -677,8 +699,6 @@ char* pinecone_id_from_heap_tid(ItemPointerData heap_tid)
     snprintf(id, 12 + 1, "%04hx%04hx%04hx", heap_tid.ip_blkid.bi_hi, heap_tid.ip_blkid.bi_lo, heap_tid.ip_posid);
     return id;
 }
-
-
 
 IndexBulkDeleteResult *pinecone_bulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
                                      IndexBulkDeleteCallback callback, void *callback_state)
@@ -706,8 +726,7 @@ IndexBulkDeleteResult *pinecone_bulkdelete(IndexVacuumInfo *info, IndexBulkDelet
 
 IndexBulkDeleteResult *no_vacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats) { return NULL; }
 
-void
-no_costestimate(PlannerInfo *root, IndexPath *path, double loop_count,
+void no_costestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 					Cost *indexStartupCost, Cost *indexTotalCost,
 					Selectivity *indexSelectivity, double *indexCorrelation,
 					double *indexPages)
@@ -726,7 +745,6 @@ bytea * pinecone_options(Datum reloptions, bool validate)
     PineconeOptions *opts;
 	static const relopt_parse_elt tab[] = {
 		{"spec", RELOPT_TYPE_STRING, offsetof(PineconeOptions, spec)},
-        {"buffer_threshold", RELOPT_TYPE_INT, offsetof(PineconeOptions, buffer_threshold)},
 	};
     opts = (PineconeOptions *) build_reloptions(reloptions, validate,
                                       pinecone_relopt_kind,
@@ -740,8 +758,7 @@ bool no_validate(Oid opclassoid) { return true; }
 /*
  * Prepare for an index scan
  */
-IndexScanDesc
-pinecone_beginscan(Relation index, int nkeys, int norderbys)
+IndexScanDesc pinecone_beginscan(Relation index, int nkeys, int norderbys)
 {
 	IndexScanDesc scan;
     PineconeScanOpaque so;
@@ -779,7 +796,7 @@ cJSON* pinecone_build_filter(Relation index, ScanKey keys, int nkeys) {
     {
         cJSON *key_filter = cJSON_CreateObject();
         cJSON *condition = cJSON_CreateObject();
-        cJSON *condition_value;
+        cJSON *condition_value = NULL;
         FormData_pg_attribute* td = TupleDescAttr(index->rd_att, keys[i].sk_attno - 1);
 
         switch (td->atttypid)
@@ -793,6 +810,8 @@ cJSON* pinecone_build_filter(Relation index, ScanKey keys, int nkeys) {
             case TEXTOID:
                 condition_value = cJSON_CreateString(TextDatumGetCString(keys[i].sk_argument));
                 break;
+            default:
+                continue; // skip unsupported types
         }
         
         // this only works if all datatypes use the same strategy naming convention. todo: document this
@@ -809,17 +828,18 @@ cJSON* pinecone_build_filter(Relation index, ScanKey keys, int nkeys) {
  * Start or restart an index scan
  * todo: can we reuse a connection created in pinecone_beginscan?
  */
-void
-pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int norderbys)
+void pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int norderbys)
 {
 	Vector * vec;
 	cJSON *query_vector_values;
-	cJSON *pinecone_response;
+	// cJSON *pinecone_response;
+    cJSON* fetch_ids;
+    cJSON** responses;
+    cJSON *query_response, *fetched_ids;
 	cJSON *matches;
     Datum query_datum; // query vector
     PineconeStaticMetaPageData pinecone_metadata = PineconeSnapshotStaticMeta(scan->indexRelation);
     PineconeScanOpaque so = (PineconeScanOpaque) scan->opaque;
-    BlockNumber currentblkno = PINECONE_BUFFER_HEAD_BLKNO;
     TupleDesc tupdesc = RelationGetDescr(scan->indexRelation); // used for accessing
     cJSON* filter;
 
@@ -841,11 +861,16 @@ pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, i
 
     // query pinecone top-k
     // todo: we want to update T when we query the index.
-    pinecone_response = pinecone_api_query_index(pinecone_api_key, pinecone_metadata.host, pinecone_top_k, query_vector_values, filter);
+    fetch_ids = get_fetch_ids(PineconeSnapshotBufferMeta(scan->indexRelation));
+    responses = pinecone_query_with_fetch(pinecone_api_key, pinecone_metadata.host, pinecone_top_k, query_vector_values, filter, true, fetch_ids);
+    query_response = responses[0];
+    fetched_ids = responses[1];
+    AdvanceLivenessTail(scan->indexRelation, fetched_ids);
+
 
     // copy pinecone_response to scan opaque
     // response has a matches array, set opaque to the child of matches aka first match
-    matches = cJSON_GetObjectItemCaseSensitive(pinecone_response, "matches");
+    matches = cJSON_GetObjectItemCaseSensitive(query_response, "matches");
     so->pinecone_results = matches->child;
     if (matches->child == NULL) {
         // todo: hint the user that the buffer might not be flushed
@@ -863,8 +888,9 @@ pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, i
 
 }
 
-bool
-load_buffer_into_sort(Relation index, PineconeScanOpaque so, Datum query_datum, TupleDesc index_tupdesc)
+// todo: save stats from inserting from base table into the meta
+
+void load_buffer_into_sort(Relation index, PineconeScanOpaque so, Datum query_datum, TupleDesc index_tupdesc)
 {
     // todo: make sure that this is just as fast as pgvector's flatscan e.g. using vectorized operations
     TupleTableSlot *slot = MakeSingleTupleTableSlot(so->tupdesc, &TTSOpsVirtual);
@@ -938,8 +964,7 @@ load_buffer_into_sort(Relation index, PineconeScanOpaque so, Datum query_datum, 
 /*
  * Fetch the next tuple in the given scan
  */
-bool
-pinecone_gettuple(IndexScanDesc scan, ScanDirection dir)
+bool pinecone_gettuple(IndexScanDesc scan, ScanDirection dir)
 {
 	// interpret scan->opaque as a cJSON object
 	char *id_str;
