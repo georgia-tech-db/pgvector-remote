@@ -1,9 +1,10 @@
+#include "pinecone_api.h"
+#include "postgres.h"
+
 #include <stdio.h>
 #include <string.h>
 #include <curl/curl.h>
-#include "cJSON.h"
-#include "pinecone_api.h"
-#include "postgres.h"
+#include "src/cJSON.h"
 
 size_t write_callback(char *contents, size_t size, size_t nmemb, void *userdata) {
     size_t real_size = size * nmemb; // Size of the response

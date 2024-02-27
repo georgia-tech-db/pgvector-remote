@@ -2,7 +2,7 @@
 #define PINECONE_API_H
 
 #include <curl/curl.h>
-#include "cJSON.h"
+#include "src/cJSON.h"
 
 #define bool _Bool
 

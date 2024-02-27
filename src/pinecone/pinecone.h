@@ -1,11 +1,12 @@
 #ifndef PINECONE_INDEX_AM_H
 #define PINECONE_INDEX_AM_H
 
-#include "postgres.h"
-#include "access/amapi.h"
-#include "vector.h"
 #include "pinecone_api.h"
-#include "cJSON.h"
+#include "postgres.h"
+
+#include "access/amapi.h"
+#include "src/vector.h"
+#include "src/cJSON.h"
 #include <nodes/execnodes.h>
 #include <nodes/pathnodes.h>
 #include <utils/array.h>

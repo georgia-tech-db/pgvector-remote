@@ -1,11 +1,12 @@
+#include "pinecone_api.h"
+#include "pinecone.h"
+
 #include "postgres.h"
 
 #include "catalog/index.h"
 #include "access/amapi.h"
-#include "vector.h"
-#include "pinecone_api.h"
-#include "pinecone.h"
-#include "cJSON.h"
+#include "src/vector.h"
+#include "src/cJSON.h"
 #include <nodes/execnodes.h>
 #include <nodes/pathnodes.h>
 #include <utils/array.h>

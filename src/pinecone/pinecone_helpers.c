@@ -1,10 +1,12 @@
+#include "pinecone_api.h"
+#include "pinecone.h"
+
 #include "postgres.h"
+
 #include "fmgr.h"
 #include <nodes/execnodes.h>
 #include "funcapi.h"
-#include "pinecone_api.h"
-#include "pinecone.h"
-#include "cJSON.h"
+#include "src/cJSON.h"
 #include "utils/builtins.h"
 #include "executor/spi.h"
 #include "fmgr.h"
