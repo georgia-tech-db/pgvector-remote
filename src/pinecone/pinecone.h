@@ -4,6 +4,7 @@
 #include "pinecone_api.h"
 #include "postgres.h"
 
+// todo: get these out of the header
 #include "access/amapi.h"
 #include "src/vector.h"
 #include "src/cJSON.h"
@@ -108,8 +109,6 @@ typedef struct PineconeOptions
 }			PineconeOptions;
 
 
-
-
 // GUC variables
 extern char* pinecone_api_key;
 extern int pinecone_top_k;
@@ -119,19 +118,26 @@ extern int pinecone_max_buffer_scan;
 #define PINECONE_BATCH_SIZE pinecone_vectors_per_request * pinecone_concurrent_requests
 
 // function declarations
+
+// pinecone.c
 Datum pineconehandler(PG_FUNCTION_ARGS); // handler
+void PineconeInit(void); // GUC and Index Options
+bytea * pinecone_options(Datum reloptions, bool validate);
+void no_costestimate(PlannerInfo *root, IndexPath *path, double loop_count,
+					Cost *indexStartupCost, Cost *indexTotalCost,
+					Selectivity *indexSelectivity, double *indexCorrelation,
+					double *indexPages);
 
 // build
 void generateRandomAlphanumeric(char *s, const int length);
-void PineconeInit(void);
 char* get_pinecone_index_name(Relation index);
 IndexBuildResult *pinecone_build(Relation heap, Relation index, IndexInfo *indexInfo);
 char* CreatePineconeIndexAndWait(Relation index, cJSON* spec_json, VectorMetric metric, char* pinecone_index_name, int dimensions);
 void InsertBaseTable(Relation heap, Relation index, IndexInfo *indexInfo, char* host, IndexBuildResult *result);
 void pinecone_build_callback(Relation index, ItemPointer tid, Datum *values, bool *isnull, bool tupleIsAlive, void *state);
-void no_buildempty(Relation index); // for some reason this is never called even when the base table is empty
 void InitIndexPages(Relation index, VectorMetric metric, int dimensions, char *pinecone_index_name, char *host, int forkNum);
 void pinecone_buildempty(Relation index);
+void no_buildempty(Relation index); // for some reason this is never called even when the base table is empty
 VectorMetric get_opclass_metric(Relation index);
 
 // insert
@@ -144,6 +150,9 @@ bool pinecone_insert(Relation index, Datum *values, bool *isnull, ItemPointer he
                      bool indexUnchanged, 
 #endif
                      IndexInfo *indexInfo);
+void AdvancePineconeTail(Relation index);
+cJSON* get_fetch_ids(PineconeBufferMetaPageData buffer_meta);
+void AdvanceLivenessTail(Relation index, cJSON* fetched_ids);
 
 // scan
 IndexScanDesc pinecone_beginscan(Relation index, int nkeys, int norderbys);
@@ -153,10 +162,6 @@ void load_buffer_into_sort(Relation index, PineconeScanOpaque so, Datum query_da
 bool pinecone_gettuple(IndexScanDesc scan, ScanDirection dir);
 void no_endscan(IndexScanDesc scan);
 
-// liveness_tail
-void AdvancePineconeTail(Relation index);
-cJSON* get_fetch_ids(PineconeBufferMetaPageData buffer_meta);
-void AdvanceLivenessTail(Relation index, cJSON* fetched_ids);
 
 // vacuum
 IndexBulkDeleteResult *pinecone_bulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
@@ -167,15 +172,14 @@ IndexBulkDeleteResult *no_vacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteRe
 void pinecone_spec_validator(const char *spec);
 void validate_api_key(void);
 void validate_vector_nonzero(Vector* vector);
-bytea * pinecone_options(Datum reloptions, bool validate);
 bool no_validate(Oid opclassoid);
 
+// utils
 // converting between postgres tuples and json vectors
 cJSON* tuple_get_pinecone_vector(TupleDesc tup_desc, Datum *values, bool *isnull, char *vector_id);
 cJSON* index_tuple_get_pinecone_vector(Relation index, IndexTuple itup);
 char* pinecone_id_from_heap_tid(ItemPointerData heap_tid);
 ItemPointerData pinecone_id_get_heap_tid(char *id);
-
 // read and write meta pages
 PineconeStaticMetaPageData GetStaticMetaPageData(Relation index);
 PineconeStaticMetaPageData PineconeSnapshotStaticMeta(Relation index);
@@ -183,10 +187,5 @@ PineconeBufferMetaPageData PineconeSnapshotBufferMeta(Relation index);
 void set_pinecone_page(Relation index, BlockNumber page, int n_new_tuples, ItemPointerData representative_vector_heap_tid);
 
 // misc.
-void no_costestimate(PlannerInfo *root, IndexPath *path, double loop_count,
-					Cost *indexStartupCost, Cost *indexTotalCost,
-					Selectivity *indexSelectivity, double *indexCorrelation,
-					double *indexPages);
-
 
 #endif // PINECONE_INDEX_AM_H
