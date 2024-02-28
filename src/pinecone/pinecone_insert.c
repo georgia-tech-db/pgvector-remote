@@ -6,26 +6,21 @@
 #include "storage/lmgr.h"
 #include "miscadmin.h" // MyDatabaseId
 
-bool AppendBufferTupleInCtx(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heapRel, IndexUniqueCheck checkUnique, IndexInfo *indexInfo)
-{
-    MemoryContext oldCtx;
-    MemoryContext insertCtx;
-    bool newpage;
-    // use a memory context because index_form_tuple can allocate 
-    insertCtx = AllocSetContextCreate(CurrentMemoryContext,
-                                      "Pinecone insert tuple temporary context",
-                                      ALLOCSET_DEFAULT_SIZES);
-    oldCtx = MemoryContextSwitchTo(insertCtx);
-    newpage = AppendBufferTuple(index, values, isnull, heap_tid, heapRel);
-    MemoryContextSwitchTo(oldCtx);
-    MemoryContextDelete(insertCtx); // delete the temporary context
-    return newpage;
-}
+#define PINECONE_FLUSH_LOCK_IDENTIFIER 1969841813 // random number, uniquely identifies the pinecone insertion lock
+#define PINECONE_APPEND_LOCK_IDENTIFIER 1969841814 // random number, uniquely identifies the pinecone append lock
+
+#define SET_LOCKTAG_FLUSH(lock, index)  SET_LOCKTAG_ADVISORY(lock, MyDatabaseId, (uint32) index->rd_id, PINECONE_FLUSH_LOCK_IDENTIFIER, 0)
+#define SET_LOCKTAG_APPEND(lock, index) SET_LOCKTAG_ADVISORY(lock, MyDatabaseId, (uint32) index->rd_id, PINECONE_APPEND_LOCK_IDENTIFIER, 0)
 
 void PineconePageInit(Page page, Size pageSize)
 {
+    PineconeBufferOpaque opaque;
     PageInit(page, pageSize, sizeof(PineconeBufferOpaqueData));
-    PineconePageGetOpaque(page)->nextblkno = InvalidBlockNumber;
+    opaque = PineconePageGetOpaque(page);
+    opaque->nextblkno = InvalidBlockNumber;
+    opaque->checkpoint.is_checkpoint = false;
+    // checkpoint
+    // ItemPointerSetInvalid
 }
 
 /* 
@@ -38,11 +33,14 @@ bool AppendBufferTuple(Relation index, Datum *values, bool *isnull, ItemPointer 
     GenericXLogState *state;
     Buffer buffer_meta_buf, insert_buf, newbuf = InvalidBuffer;
     Page buffer_meta_page, insert_page, newpage;
+    PineconeBufferOpaque  new_opaque;
     PineconeBufferMetaPage buffer_meta;
+    BlockNumber newblkno;
+    LOCKTAG pinecone_append_lock;
     Size itemsz;
-    bool success;
+    PineconeBufferMetaPageData meta_snapshot;
     bool full;
-    bool checkpoint_created = false;
+    bool create_checkpoint = false;
     
     // prepare the index tuple
     itup = index_form_tuple(RelationGetDescr(index), values, isnull);
@@ -50,43 +48,54 @@ bool AppendBufferTuple(Relation index, Datum *values, bool *isnull, ItemPointer 
     itemsz = MAXALIGN(IndexTupleSize(itup));
 
     /* LOCKING STRATEGY FOR INSERTION
-     * acquire meta
-     * acquire insert_page
+     * acquire append lock
+     * read a snapshot of meta
+     * acquire meta.insert_page
      * if insert_page is not full:
      *   add item to insert_page:
      * if insert_page is full:
-     *   acquire & create new page
-     *   add item to new page:
-     *     update insert_page nextblkno
-     *     update meta insert_page
-     *   release newpage
-     *   if this qualifies as a checkpoint, set it as the latest head checkpoint
-     * update meta counts
-     * release insert_page, meta
+     *   acquire meta
+     *   acquire & create newpage
+     *   add item to newpage:
+     *     insert_page.nextblkno = newpage.blkno
+     *     meta.n_unflushed_tuples += (tuples on old page)
+     *     meta.insert_page = newpage.blkno
+     *   if this qualifies as a checkpoint:
+     *     newpage.prev_checkpoint = meta.latest_checkpoint
+     *     meta.latest_checkpoint = newpage.blkno
+     *     newpage.representative_vector_heap_tid = itup.t_tid
+     *   release newpage, meta
+     * release insert_page, newpage, meta
+     * release append lock
      * (if it was full and threshold met, we will next try to advance pinecone head)
      */
 
-    // NEW
+    // acquire append lock
+    SET_LOCKTAG_APPEND(pinecone_append_lock, index); LockAcquire(&pinecone_append_lock, ExclusiveLock, false, false);
     // start WAL logging
     state = GenericXLogStart(index);
-    // acquire the buffer metapage // todo: rename "buffer" something less confusing
-    buffer_meta_buf = ReadBuffer(index, PINECONE_BUFFER_METAPAGE_BLKNO); LockBuffer(buffer_meta_buf, BUFFER_LOCK_EXCLUSIVE);
-    buffer_meta_page = GenericXLogRegisterBuffer(state, buffer_meta_buf, 0); 
-    buffer_meta = PineconePageGetBufferMeta(buffer_meta_page);
+    // read a snapshot of the buffer meta
+    meta_snapshot = PineconeSnapshotBufferMeta(index);
     // acquire the insert page
-    insert_buf = ReadBuffer(index, buffer_meta->insert_page); LockBuffer(insert_buf, BUFFER_LOCK_EXCLUSIVE);
+    insert_buf = ReadBuffer(index, meta_snapshot.insert_page); LockBuffer(insert_buf, BUFFER_LOCK_EXCLUSIVE);
     insert_page = GenericXLogRegisterBuffer(state, insert_buf, 0);
-    // check if the page is full
+    // check if the page is full and if we want to create a new checkpoint
     full = PageGetFreeSpace(insert_page) < itemsz;
-    if (full) {
-        success = PageAddItem(insert_page, (Item) itup, itemsz, InvalidOffsetNumber, false, false);
+    create_checkpoint = meta_snapshot.n_tuples_since_last_checkpoint + PageGetMaxOffsetNumber(insert_page) >= PINECONE_BATCH_SIZE;
+
+    // add item to insert page
+    if (!full && !create_checkpoint) {
+        PageAddItem(insert_page, (Item) itup, itemsz, InvalidOffsetNumber, false, false);
+        // release insert_page
+        GenericXLogFinish(state);
+        UnlockReleaseBuffer(insert_buf);
     } else {
-        // todo: we don't want to hold an exclusive lock on the buffer_meta page every time we want to insert a single tuple
-        // we should only hold it when we need to update the meta because we are creating a new page
-        // it isn't possible for another writer to interfere with us because we have a lock on the insert page
-        // but another writer could see an outdated insert_page and try to acquire it.
+        // acquire the meta
+        buffer_meta_buf = ReadBuffer(index, PINECONE_BUFFER_METAPAGE_BLKNO); LockBuffer(buffer_meta_buf, BUFFER_LOCK_EXCLUSIVE);
+        buffer_meta_page = GenericXLogRegisterBuffer(state, buffer_meta_buf, 0);
+        buffer_meta = PineconePageGetBufferMeta(buffer_meta_page);
         // acquire and create a new page
-        LockRelationForExtension(index, ExclusiveLock); // acquire a lock to let us add pages to the relation (this isn't really necessary since we will always have the buffer_meta locked.)
+        LockRelationForExtension(index, ExclusiveLock); // acquire a lock to let us add pages to the relation (this isn't really necessary since we will always have the append lock anyway)
         newbuf = ReadBufferExtended(index, MAIN_FORKNUM, P_NEW, RBM_NORMAL, NULL);
         LockBuffer(newbuf, BUFFER_LOCK_EXCLUSIVE);
         UnlockRelationForExtension(index, ExclusiveLock);
@@ -95,33 +104,52 @@ bool AppendBufferTuple(Relation index, Datum *values, bool *isnull, ItemPointer 
         // check that there is room on the new page
         if (PageGetFreeSpace(newpage) < itemsz) elog(ERROR, "A new page was created, but it doesn't have enough space for the new tuple");
         // add item to new page
-        success = PageAddItem(newpage, (Item) itup, itemsz, InvalidOffsetNumber, false, false);
+        PageAddItem(newpage, (Item) itup, itemsz, InvalidOffsetNumber, false, false);
         // update insert_page nextblkno
-        PineconePageGetOpaque(insert_page)->nextblkno = BufferGetBlockNumber(newbuf);
-        // update meta insert_page
-        buffer_meta->insert_page = BufferGetBlockNumber(newbuf);
+        newblkno = BufferGetBlockNumber(newbuf);
+        PineconePageGetOpaque(insert_page)->nextblkno = newblkno;
+        // update meta
+        buffer_meta->insert_page = newblkno;
+        buffer_meta->n_tuples_since_last_checkpoint += PageGetMaxOffsetNumber(insert_page);
         // if this qualifies as a checkpoint, set this page as the latest head checkpoint
-        checkpoint_created = buffer_meta->n_tuples - buffer_meta->n_latest_head_checkpoint >= PINECONE_BATCH_SIZE;
-        if (checkpoint_created) {
-            buffer_meta->latest_head_checkpoint = buffer_meta->insert_page;
-            buffer_meta->n_latest_head_checkpoint = buffer_meta->n_tuples;
+        if (create_checkpoint) {
+            // create a checkpoint on the opaque of the new page
+            new_opaque = PineconePageGetOpaque(newpage);
+            new_opaque->prev_checkpoint_blkno = buffer_meta->latest_checkpoint.blkno;
+            new_opaque->checkpoint = buffer_meta->latest_checkpoint;
+            new_opaque->checkpoint.tid = itup->t_tid; // we will assume we have inserted up to this checkpoint if we see this tid in pinecone
+            new_opaque->checkpoint.blkno = newblkno;
+            new_opaque->checkpoint.checkpoint_no += 1;
+            new_opaque->checkpoint.n_preceding_tuples += buffer_meta->n_tuples_since_last_checkpoint;
+            // set this page as the latest head checkpoint
+            buffer_meta->latest_checkpoint = new_opaque->checkpoint;
+            buffer_meta->n_tuples_since_last_checkpoint = 0;
+
         }
+        // release insert_page, newpage, meta
+        GenericXLogFinish(state);
+        UnlockReleaseBuffer(insert_buf); UnlockReleaseBuffer(newbuf); UnlockReleaseBuffer(buffer_meta_buf);
     }
-    // update meta counts
-    buffer_meta->n_tuples++;
-    // release insert_page, meta
-    GenericXLogFinish(state);
-    UnlockReleaseBuffer(insert_buf);
-    UnlockReleaseBuffer(buffer_meta_buf);
-    if (success) {
-        // todo: check page add item success
-    }
-    if (full) {
-        UnlockReleaseBuffer(newbuf);
-    }
-    return checkpoint_created;
+    // release append lock
+    LockRelease(&pinecone_append_lock, ExclusiveLock, false);
+    return create_checkpoint;
 }
 
+bool AppendBufferTupleInCtx(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heapRel, IndexUniqueCheck checkUnique, IndexInfo *indexInfo)
+{
+    MemoryContext oldCtx;
+    MemoryContext insertCtx;
+    bool checkpoint_created;
+    // use a memory context because index_form_tuple can allocate 
+    insertCtx = AllocSetContextCreate(CurrentMemoryContext,
+                                      "Pinecone insert tuple temporary context",
+                                      ALLOCSET_DEFAULT_SIZES);
+    oldCtx = MemoryContextSwitchTo(insertCtx);
+    checkpoint_created = AppendBufferTuple(index, values, isnull, heap_tid, heapRel);
+    MemoryContextSwitchTo(oldCtx);
+    MemoryContextDelete(insertCtx); // delete the temporary context
+    return checkpoint_created;
+}
 
 /*
  * Insert a tuple into the index
@@ -140,19 +168,22 @@ bool pinecone_insert(Relation index, Datum *values, bool *isnull, ItemPointer he
 
     // if there are enough tuples in the buffer, advance the pinecone tail
     if (checkpoint_created) {
-        AdvancePineconeTail(index);
+        FlushToPinecone(index);
     }
 
     return false;
 }
 
+// todo: it will make debugging a lot easier to have a way to pretty print the state of the relation e.g. how many tups per page
+
+
 /*
  * Upload batches of vectors to pinecone.
  */
-void AdvancePineconeTail(Relation index)
+void FlushToPinecone(Relation index)
 {
-    Buffer buf;
-    Page page;
+    Buffer buf, buffer_meta_buf;
+    Page page, buffer_meta_page;
     BlockNumber currentblkno = PINECONE_BUFFER_HEAD_BLKNO;
     cJSON* json_vectors = cJSON_CreateArray();
     bool success;
@@ -163,27 +194,18 @@ void AdvancePineconeTail(Relation index)
     PineconeBufferMetaPageData buffer_meta = PineconeSnapshotBufferMeta(index);
 
     // acquire the pinecone insertion lock
-    LOCKTAG pinecone_insertion_lock;
-    SET_LOCKTAG_ADVISORY(pinecone_insertion_lock, MyDatabaseId, (uint32) index->rd_id, PINECONE_INSERTION_LOCK_IDENTIFIER, 0);
-    success = LockAcquire(&pinecone_insertion_lock, ExclusiveLock, false, true);
+    LOCKTAG pinecone_flush_lock;
+    SET_LOCKTAG_FLUSH(pinecone_flush_lock, index);
+    success = LockAcquire(&pinecone_flush_lock, ExclusiveLock, false, true);
     if (!success) {
         ereport(NOTICE, (errcode(ERRCODE_LOCK_NOT_AVAILABLE),
                         errmsg("Pinecone insertion lock not available"),
-                        errhint("The pinecone insertion lock is currently held by another transaction. This is likely because the buffer is being advanced.")));
-        return;
-    }
-
-    // if the liveness tail is behind by more than PINECONE_N_CHECKPOINTS, abort
-    if (buffer_meta.checkpoints[PINECONE_N_CHECKPOINTS - 1].page != InvalidBlockNumber) {
-        ereport(NOTICE, (errcode(ERRCODE_INTERNAL_ERROR),
-                        errmsg("Pinecone head is too far ahead of the liveness tail"),
-                        errhint("The buffer is %d vectors ahead of the liveness tail. More vectors will not be uploaded to pinecone until pinecone catches up on indexing.", buffer_meta.n_pinecone_tuples - buffer_meta.n_pinecone_live_tuples)));
-        LockRelease(&pinecone_insertion_lock, ExclusiveLock, false);
+                        errhint("The pinecone insertion lock is currently held by another transaction. This is likely because the buffer is being advanced by another transaction. This is not an error, but it may cause a delay in the insertion of new vectors.")));
         return;
     }
 
     // get the first page
-    buf = ReadBuffer(index, buffer_meta.pinecone_page);
+    buf = ReadBuffer(index, buffer_meta.flush_checkpoint.blkno);
     if (BufferIsInvalid(buf)) {
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
                         errmsg("Pinecone buffer page not found")));
@@ -216,64 +238,33 @@ void AdvancePineconeTail(Relation index)
         LockBuffer(buf, BUFFER_LOCK_SHARE);
         page = BufferGetPage(buf);
 
-        // If we have enough vectors, push them to the remote index and update the pinecone checkpoint
-        if (cJSON_GetArraySize(json_vectors) >= PINECONE_BATCH_SIZE) {
-            cJSON* fetched_ids;
-            cJSON* fetch_ids;
-            fetch_ids = get_fetch_ids(buffer_meta);
-            fetched_ids = pinecone_bulk_upsert_with_fetch(pinecone_api_key, static_meta.host, json_vectors, pinecone_vectors_per_request, true, fetch_ids);
+        // If we have reached a checkpoint, push them to the remote index and update the pinecone checkpoint with a representative vector heap tid
+        if (PineconePageGetOpaque(page)->checkpoint.is_checkpoint) {
+            GenericXLogState *state = GenericXLogStart(index); // start a new WAL record
+ 
+            pinecone_bulk_upsert(pinecone_api_key, static_meta.host, json_vectors, pinecone_vectors_per_request);
 
-            // advance the liveness tail if any of the fetched_checkpoints are still checkpoints
-            AdvanceLivenessTail(index, fetched_ids);
+            // lock the buffer meta page
+            buffer_meta_buf = ReadBuffer(index, PINECONE_BUFFER_METAPAGE_BLKNO);
+            LockBuffer(buffer_meta_buf, BUFFER_LOCK_EXCLUSIVE);
+            buffer_meta_page = GenericXLogRegisterBuffer(state, buffer_meta_buf, 0);
 
-            // update the pinecone page and make a new checkpoint
-            set_pinecone_page(index, currentblkno, cJSON_GetArraySize(json_vectors), itup->t_tid);
+            // update the buffer meta page
+            PineconePageGetBufferMeta(buffer_meta_page)->flush_checkpoint = PineconePageGetOpaque(page)->checkpoint;
+
+            // save and release
+            GenericXLogFinish(state);
+            UnlockReleaseBuffer(buffer_meta_buf);
+
             // free
             cJSON_Delete(json_vectors); json_vectors = cJSON_CreateArray();
-            // stop if we don't expect to have another batch
-            if (currentblkno >= buffer_meta.latest_head_checkpoint) break;
+
+            // stop if we don't expect to have another batch because we have reached the last checkpoint
+            if (buffer_meta.latest_checkpoint.blkno == currentblkno) break;
         }
     }
     UnlockReleaseBuffer(buf); // release the last buffer
 
     // release the lock
-    LockRelease(&pinecone_insertion_lock, ExclusiveLock, false);
-}
-
-
-cJSON* get_fetch_ids(PineconeBufferMetaPageData buffer_meta) {
-    cJSON* fetch_ids = cJSON_CreateArray();
-    // TODO
-    // iter thru buffer_meta.checkpoints and push pinecone_id_from_heap_tid(representative_vector_tid) to fetch tids
-
-    return fetch_ids;
-}
-
-void AdvanceLivenessTail(Relation index, cJSON* fetched_ids) {
-    Page buffer_meta_page;
-    PineconeBufferMetaPage buffer_meta;
-    Buffer buffer_meta_buf = ReadBuffer(index, PINECONE_BUFFER_METAPAGE_BLKNO);
-    GenericXLogState* state = GenericXLogStart(index);
-    // get Buffer's MetaPage
-    LockBuffer(buffer_meta_buf, BUFFER_LOCK_EXCLUSIVE);
-    buffer_meta_page = GenericXLogRegisterBuffer(state, buffer_meta_buf, 0); 
-    buffer_meta = PineconePageGetBufferMeta(buffer_meta_page);
-    // search backwards through buffer_meta.checkpoints
-    // if any of the checkpoint.representative_tid are in the fetched_ids
-    // set this as the new pinecone_known_live_page and move back the list to make this the first checkpoint
-    for (int i = PINECONE_N_CHECKPOINTS - 1; i >= 0; i--) {
-        // TODO: this is an array not an object
-        if (cJSON_IsString(cJSON_GetObjectItem(fetched_ids, pinecone_id_from_heap_tid(buffer_meta->checkpoints[i].representative_tid)))) {
-            buffer_meta->pinecone_known_live_page = buffer_meta->checkpoints[i].page;
-            // move back the list to make this the first checkpoint
-            for (int j = i; j > 0; j--) {
-                buffer_meta->checkpoints[j] = buffer_meta->checkpoints[j - 1];
-            }
-            buffer_meta->checkpoints[0].page = InvalidBlockNumber;
-            break;
-        }
-    }
-    // save
-    UnlockReleaseBuffer(buffer_meta_buf);
-    GenericXLogFinish(state);
+    LockRelease(&pinecone_flush_lock, ExclusiveLock, false);
 }

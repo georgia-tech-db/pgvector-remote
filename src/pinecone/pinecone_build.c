@@ -26,15 +26,15 @@ void generateRandomAlphanumeric(char *s, const int length) {
 
 
 char* get_pinecone_index_name(Relation index) {
-    char* pinecone_index_name = palloc(45); // pinecone's maximum index name length is 45
+    char* pinecone_index_name = palloc(PINECONE_NAME_MAX_LENGTH + 1); // pinecone's maximum index name length is 45
     char* index_name;
     char random_postfix[5];
     int name_length;
     // create the pinecone_index_name like pgvector-{oid}-{index_name}-{random_postfix}
     index_name = NameStr(index->rd_rel->relname);
     generateRandomAlphanumeric(random_postfix, 4);
-    name_length = snprintf(pinecone_index_name, sizeof(pinecone_index_name), "pgvector-%u-%s-%s", index->rd_id, index_name, random_postfix);
-    if (name_length >= sizeof(pinecone_index_name)) {
+    name_length = snprintf(pinecone_index_name, PINECONE_NAME_MAX_LENGTH+1, "pgvector-%u-%s-%s", index->rd_id, index_name, random_postfix);
+    if (name_length > PINECONE_NAME_MAX_LENGTH) {
         ereport(ERROR, (errcode(ERRCODE_NAME_TOO_LONG), errmsg("Pinecone index name too long"), errhint("The pinecone index name is %s... and is %d characters long. The maximum length is 45 characters.", pinecone_index_name, name_length)));
     }
     // check that all chars are alphanumeric or hyphen
@@ -107,7 +107,7 @@ void InsertBaseTable(Relation heap, Relation index, IndexInfo *indexInfo, char* 
     // iterate through the base table and upsert the vectors to the remote index
     reltuples = table_index_build_scan(heap, index, indexInfo, true, true, pinecone_build_callback, (void *) &buildstate, NULL);
     if (cJSON_GetArraySize(buildstate.json_vectors) > 0) {
-        pinecone_bulk_upsert_with_fetch(pinecone_api_key, host, buildstate.json_vectors, pinecone_vectors_per_request, false, NULL);
+        pinecone_bulk_upsert(pinecone_api_key, host, buildstate.json_vectors, pinecone_vectors_per_request);
     }
     cJSON_Delete(buildstate.json_vectors);
     // stats
@@ -124,7 +124,7 @@ void pinecone_build_callback(Relation index, ItemPointer tid, Datum *values, boo
     json_vector = tuple_get_pinecone_vector(itup_desc, values, isnull, pinecone_id);
     cJSON_AddItemToArray(buildstate->json_vectors, json_vector);
     if (cJSON_GetArraySize(buildstate->json_vectors) >= PINECONE_BATCH_SIZE) {
-        pinecone_bulk_upsert_with_fetch(pinecone_api_key, buildstate->host, buildstate->json_vectors, pinecone_vectors_per_request, false, NULL);
+        pinecone_bulk_upsert(pinecone_api_key, buildstate->host, buildstate->json_vectors, pinecone_vectors_per_request);
         cJSON_Delete(buildstate->json_vectors);
         buildstate->json_vectors = cJSON_CreateArray();
     }
@@ -142,6 +142,7 @@ void InitIndexPages(Relation index, VectorMetric metric, int dimensions, char *p
     Page meta_page, buffer_meta_page, buffer_head_page;
     PineconeStaticMetaPage pinecone_static_meta_page;
     PineconeBufferMetaPage pinecone_buffer_meta_page;
+    PineconeBufferOpaque buffer_head_opaque;
     GenericXLogState *state = GenericXLogStart(index);
 
     // Lock the relation for extension, not really necessary since this is called exactly once in build_index
@@ -163,6 +164,17 @@ void InitIndexPages(Relation index, VectorMetric metric, int dimensions, char *p
         ereport(ERROR, (errcode(ERRCODE_NAME_TOO_LONG), errmsg("Pinecone index name too long"), errhint("The pinecone index name is %s... and is %d characters long. The maximum length is %d characters.", pinecone_index_name, (int) strlen(pinecone_index_name), (int) sizeof(pinecone_static_meta_page->pinecone_index_name))));
     }
 
+    // CREATE THE BUFFER HEAD
+    buffer_head_buf = ReadBufferExtended(index, forkNum, P_NEW, RBM_NORMAL, NULL);
+    Assert(BufferGetBlockNumber(buffer_head_buf) == PINECONE_BUFFER_HEAD_BLKNO);
+    buffer_head_page = GenericXLogRegisterBuffer(state, buffer_head_buf, GENERIC_XLOG_FULL_IMAGE);
+    PineconePageInit(buffer_head_page, BufferGetPageSize(buffer_head_buf));
+    buffer_head_opaque = PineconePageGetOpaque(buffer_head_page);
+    buffer_head_opaque->checkpoint.blkno = PINECONE_BUFFER_HEAD_BLKNO;
+    buffer_head_opaque->checkpoint.checkpoint_no = 0;
+    buffer_head_opaque->checkpoint.n_preceding_tuples = 0;
+    buffer_head_opaque->checkpoint.is_checkpoint = true;
+
     // CREATE THE BUFFER META PAGE
     buffer_meta_buf = ReadBufferExtended(index, forkNum, P_NEW, RBM_NORMAL, NULL);
     Assert(BufferGetBlockNumber(buffer_meta_buf) == PINECONE_BUFFER_METAPAGE_BLKNO);
@@ -170,23 +182,11 @@ void InitIndexPages(Relation index, VectorMetric metric, int dimensions, char *p
     PageInit(buffer_meta_page, BufferGetPageSize(buffer_meta_buf), sizeof(PineconeBufferMetaPageData)); // format as a page
     pinecone_buffer_meta_page = PineconePageGetBufferMeta(buffer_meta_page);
     // set head, pinecone_tail, and live_tail to START
+    pinecone_buffer_meta_page->ready_checkpoint = buffer_head_opaque->checkpoint;
+    pinecone_buffer_meta_page->flush_checkpoint = buffer_head_opaque->checkpoint;
+    pinecone_buffer_meta_page->latest_checkpoint = buffer_head_opaque->checkpoint;
     pinecone_buffer_meta_page->insert_page = PINECONE_BUFFER_HEAD_BLKNO;
-    pinecone_buffer_meta_page->pinecone_page = PINECONE_BUFFER_HEAD_BLKNO;
-    pinecone_buffer_meta_page->pinecone_known_live_page = PINECONE_BUFFER_HEAD_BLKNO;
-    // set n_tuples to 0
-    pinecone_buffer_meta_page->n_tuples = 0;
-    pinecone_buffer_meta_page->n_pinecone_tuples = 0;
-    pinecone_buffer_meta_page->n_pinecone_live_tuples = 0;
-    // set all checkpoint pages to InvalidBlockNumber
-    for (int i = 0; i < PINECONE_N_CHECKPOINTS; i++) {
-        pinecone_buffer_meta_page->checkpoints[i].page = InvalidBlockNumber;
-    }
-
-    // CREATE THE BUFFER HEAD
-    buffer_head_buf = ReadBufferExtended(index, forkNum, P_NEW, RBM_NORMAL, NULL);
-    Assert(BufferGetBlockNumber(buffer_head_buf) == PINECONE_BUFFER_HEAD_BLKNO);
-    buffer_head_page = GenericXLogRegisterBuffer(state, buffer_head_buf, GENERIC_XLOG_FULL_IMAGE);
-    PineconePageInit(buffer_head_page, BufferGetPageSize(buffer_head_buf));
+    pinecone_buffer_meta_page->n_tuples_since_last_checkpoint = 0;
 
     // cleanup
     GenericXLogFinish(state);

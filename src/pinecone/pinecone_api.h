@@ -24,7 +24,7 @@ cJSON* pinecone_delete_index(const char *api_key, const char *index_name);
 cJSON* pinecone_list_vectors(const char *api_key, const char *index_host, int limit, char* pagination_token);
 cJSON* pinecone_create_index(const char *api_key, const char *index_name, const int dimension, const char *metric, cJSON *spec);
 cJSON** pinecone_query_with_fetch(const char *api_key, const char *index_host, const int topK, cJSON *query_vector_values, cJSON *filter, bool with_fetch, cJSON* fetch_ids);
-cJSON* pinecone_bulk_upsert_with_fetch(const char *api_key, const char *index_host, cJSON *vectors, int batch_size, bool with_fetch, cJSON* fetch_ids);
+cJSON* pinecone_bulk_upsert(const char *api_key, const char *index_host, cJSON *vectors, int batch_size);
 CURL* get_pinecone_query_handle(const char *api_key, const char *index_host, const int topK, cJSON *query_vector_values, cJSON *filter, ResponseData* response_data);
 CURL* get_pinecone_upsert_handle(const char *api_key, const char *index_host, cJSON *vectors, ResponseData* response_data);
 CURL* get_pinecone_fetch_handle(const char *api_key, const char *index_host, cJSON* ids, ResponseData* response_data);

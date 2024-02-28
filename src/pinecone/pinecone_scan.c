@@ -6,6 +6,59 @@
 #include "utils/rel.h"
 #include "utils/builtins.h"
 
+PineconeCheckpoint* get_checkpoints_to_fetch(Relation index) {
+    // starting at the current pinecone page, create a list of each checkpoint page's checkpoint (blkno, tid, checkpt_no)
+    PineconeBufferMetaPageData buffer_meta = PineconeSnapshotBufferMeta(index);
+    int n_checkpoints = buffer_meta.flush_checkpoint.checkpoint_no - buffer_meta.ready_checkpoint.checkpoint_no;
+    PineconeCheckpoint* checkpoints = palloc((n_checkpoints+1) * sizeof(PineconeCheckpoint));
+    // traverse from the flushed checkpoint back to the live checkpoint and append each checkpoint to the list
+    BlockNumber currentblkno = buffer_meta.flush_checkpoint.blkno;
+    PineconeBufferOpaqueData opaque = PineconeSnapshotBufferOpaque(index, currentblkno);
+    for (int i = 0; i < n_checkpoints; i++) {
+        // move to the previous checkpoint
+        currentblkno = opaque.prev_checkpoint_blkno;
+        opaque = PineconeSnapshotBufferOpaque(index, currentblkno);
+        checkpoints[i] = opaque.checkpoint;
+    }
+    // append a sentinel value
+    checkpoints[n_checkpoints].is_checkpoint = false;
+    return checkpoints;
+}
+
+cJSON* fetch_ids_from_checkpoints(PineconeCheckpoint* checkpoints) {
+    cJSON* fetch_ids = cJSON_CreateArray();
+    for (int i = 0; checkpoints[i].is_checkpoint; i++) {
+        cJSON_AddItemToArray(fetch_ids, cJSON_CreateString(pinecone_id_from_heap_tid(checkpoints[i].tid)));
+    }
+    return fetch_ids;
+}
+
+PineconeCheckpoint get_best_fetched_checkpoint(Relation index, PineconeCheckpoint* checkpoints, cJSON* fetch_results) {
+    // find the latest checkpoint that has was fetched (i.e. is in fetch_results)
+    // todo: add timestamping so that we can assume that if the pinecone page is sufficiently old, we can assume it is live. (simple)
+
+    // preprocess the results from a json array of objects to a list of ItemPointerData
+    PineconeCheckpoint best_checkpoint = {INVALID_CHECKPOINT_NUMBER, InvalidBlockNumber, {{0, 0},0}, 0};
+    int n_fetched = cJSON_GetArraySize(fetch_results);
+    ItemPointerData* fetched_tids = palloc(sizeof(ItemPointerData) * n_fetched);
+    for (int i = 0; i < cJSON_GetArraySize(fetch_results); i++) {
+        cJSON* vector = cJSON_GetArrayItem(fetch_results, i);
+        cJSON* id = cJSON_GetObjectItemCaseSensitive(vector, "id");
+        fetched_tids[i] = pinecone_id_get_heap_tid(cJSON_GetStringValue(id));
+    }
+
+    // the checkpoints are listed in reverse chronological order, so we can return the first checkpoint that is in fetch_results
+    for (int i = 0; checkpoints[i].is_checkpoint; i++) {
+        // search for the checkpoint in the fetched tids
+        for (int j = 0; j < n_fetched; j++) {
+            if (ItemPointerEquals(&checkpoints[i].tid, &fetched_tids[j])) {
+                best_checkpoint = checkpoints[i];
+                break;
+            }
+        }
+    }
+    return best_checkpoint;
+}
 
 /*
  * Prepare for an index scan
@@ -78,7 +131,7 @@ cJSON* pinecone_build_filter(Relation index, ScanKey keys, int nkeys) {
 
 /*
  * Start or restart an index scan
- * todo: can we reuse a connection created in pinecone_beginscan?
+ * todo: can we reuse a tcp connection created in pinecone_beginscan?
  */
 void pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int norderbys)
 {
@@ -86,14 +139,16 @@ void pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderb
 	cJSON *query_vector_values;
 	// cJSON *pinecone_response;
     cJSON* fetch_ids;
+    PineconeCheckpoint* fetch_checkpoints;
     cJSON** responses;
-    cJSON *query_response, *fetched_ids;
+    cJSON *query_response, *fetch_response;
 	cJSON *matches;
     Datum query_datum; // query vector
     PineconeStaticMetaPageData pinecone_metadata = PineconeSnapshotStaticMeta(scan->indexRelation);
     PineconeScanOpaque so = (PineconeScanOpaque) scan->opaque;
     TupleDesc tupdesc = RelationGetDescr(scan->indexRelation); // used for accessing
     cJSON* filter;
+    PineconeCheckpoint best_checkpoint;
 
     // check that the ORDER BY is on the first column (which is assumed to be a column on vectors)
     if (scan->numberOfOrderBys == 0 || orderbys[0].sk_attno != 1) {
@@ -112,13 +167,15 @@ void pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderb
     query_vector_values = cJSON_CreateFloatArray(vec->x, vec->dim);
 
     // query pinecone top-k
-    // todo: we want to update T when we query the index.
-    fetch_ids = get_fetch_ids(PineconeSnapshotBufferMeta(scan->indexRelation));
+    fetch_checkpoints = get_checkpoints_to_fetch(scan->indexRelation);
+    fetch_ids = fetch_ids_from_checkpoints(fetch_checkpoints);
     responses = pinecone_query_with_fetch(pinecone_api_key, pinecone_metadata.host, pinecone_top_k, query_vector_values, filter, true, fetch_ids);
     query_response = responses[0];
-    fetched_ids = responses[1];
-    AdvanceLivenessTail(scan->indexRelation, fetched_ids);
+    fetch_response = responses[1];
+    best_checkpoint = get_best_fetched_checkpoint(scan->indexRelation, fetch_checkpoints, fetch_response);
 
+    // set the pinecone_ready_page to the best checkpoint
+    set_buffer_meta_page(scan->indexRelation, &best_checkpoint, NULL, NULL, NULL, NULL);
 
     // copy pinecone_response to scan opaque
     // response has a matches array, set opaque to the child of matches aka first match
@@ -147,17 +204,17 @@ void load_buffer_into_sort(Relation index, PineconeScanOpaque so, Datum query_da
     // todo: make sure that this is just as fast as pgvector's flatscan e.g. using vectorized operations
     TupleTableSlot *slot = MakeSingleTupleTableSlot(so->tupdesc, &TTSOpsVirtual);
     PineconeBufferMetaPageData buffer_meta = PineconeSnapshotBufferMeta(index);
-    BlockNumber currentblkno = buffer_meta.pinecone_page; // todo: use pinecone_known_live_age (aka T)
+    BlockNumber currentblkno = buffer_meta.ready_checkpoint.blkno;
     int n_sortedtuple = 0;
+    int n_tuples = buffer_meta.latest_checkpoint.n_preceding_tuples + buffer_meta.n_tuples_since_last_checkpoint;
+    int unflushed_tuples = n_tuples - buffer_meta.flush_checkpoint.n_preceding_tuples;
+    int unready_tuples = n_tuples - buffer_meta.ready_checkpoint.n_preceding_tuples;
 
-    // check H - P > max_local_scan
-    if (buffer_meta.n_tuples - buffer_meta.n_pinecone_live_tuples > pinecone_max_buffer_scan) {
-        int unflused = buffer_meta.n_tuples - buffer_meta.n_pinecone_tuples;
-        int not_live = buffer_meta.n_pinecone_tuples - buffer_meta.n_pinecone_live_tuples;
-        // warn the user that %d tuples have not yet been flushed and that %d tuples are not yet live in pinecone
+    // check H - T > max_local_scan
+    if (unready_tuples > pinecone_max_buffer_scan) {
         ereport(NOTICE, (errcode(ERRCODE_INSUFFICIENT_RESOURCES),
                          errmsg("Buffer is too large"),
-                         errhint("There are %d tuples in the buffer that have not yet been flushed to pinecone and %d tuples in pinecone that are not yet live in pinecone. You may want to consider flushing the buffer.", unflused, not_live)));
+                         errhint("There are %d tuples in the buffer that have not yet been flushed to pinecone and %d tuples in pinecone that are not yet live. You may want to consider flushing the buffer.", unflushed_tuples, unready_tuples - unflushed_tuples)));
     }
 
     // add tuples to the sortstate

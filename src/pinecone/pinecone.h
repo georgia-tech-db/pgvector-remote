@@ -22,14 +22,15 @@
 #define PINECONE_BUFFER_METAPAGE_BLKNO 1
 #define PINECONE_BUFFER_HEAD_BLKNO 2
 
-#define PINECONE_N_CHECKPOINTS 10
-
-#define PINECONE_INSERTION_LOCK_IDENTIFIER 1969841813 // random number, uniquely identifies the pinecone insertion lock
-
+#define INVALID_CHECKPOINT_NUMBER -1
 
 #define PineconePageGetOpaque(page)	((PineconeBufferOpaque) PageGetSpecialPointer(page))
 #define PineconePageGetStaticMeta(page)	((PineconeStaticMetaPage) PageGetContents(page))
 #define PineconePageGetBufferMeta(page)    ((PineconeBufferMetaPage) PageGetContents(page))
+
+// pinecone specific limits
+
+#define PINECONE_NAME_MAX_LENGTH 45
 
 // structs
 typedef struct PineconeScanOpaqueData
@@ -57,11 +58,6 @@ typedef PineconeScanOpaqueData *PineconeScanOpaque;
 
 extern const char* vector_metric_to_pinecone_metric[VECTOR_METRIC_COUNT];
 
-typedef struct PineconeCheckpoint {
-    BlockNumber page;
-    ItemPointerData representative_tid;
-} PineconeCheckpoint;
-
 typedef struct PineconeStaticMetaPageData
 {
     int dimensions;
@@ -70,31 +66,6 @@ typedef struct PineconeStaticMetaPageData
     VectorMetric metric;
 } PineconeStaticMetaPageData;
 typedef PineconeStaticMetaPageData *PineconeStaticMetaPage;
-
-typedef struct PineconeBufferMetaPageData
-{
-    BlockNumber pinecone_known_live_page;
-    BlockNumber pinecone_page;
-    BlockNumber insert_page;
-    int n_tuples;
-    int n_pinecone_tuples;
-    int n_pinecone_live_tuples;
-
-    BlockNumber latest_head_checkpoint;
-    int n_latest_head_checkpoint;
-
-    PineconeCheckpoint checkpoints[PINECONE_N_CHECKPOINTS];
-} PineconeBufferMetaPageData;
-typedef PineconeBufferMetaPageData *PineconeBufferMetaPage;
-
-typedef struct PineconeBufferOpaqueData
-{
-    BlockNumber nextblkno;
-    uint16 unused;
-    uint16 page_id; // not sure what this is for, but its in the ivf opaques
-} PineconeBufferOpaqueData;
-typedef PineconeBufferOpaqueData *PineconeBufferOpaque;
-
 typedef struct PineconeBuildState
 {
     int64 indtuples; // total number of tuples indexed
@@ -107,6 +78,39 @@ typedef struct PineconeOptions
 	int32		vl_len_;		/* varlena header (do not touch directly!) */
     int         spec; // spec is a string; this is its offset in the rd_options
 }			PineconeOptions;
+
+typedef struct PineconeCheckpoint
+{
+    int checkpoint_no; // unused by fetch_ids
+    BlockNumber blkno; // unused in the page's opaque data
+    ItemPointerData tid; // unused in the buffer meta
+    int n_preceding_tuples; 
+    bool is_checkpoint;
+} PineconeCheckpoint;
+
+typedef struct PineconeBufferMetaPageData
+{
+    // FIFO pointers
+    PineconeCheckpoint ready_checkpoint;
+    PineconeCheckpoint flush_checkpoint;
+    PineconeCheckpoint latest_checkpoint;
+
+    // INSERT PAGE
+    BlockNumber insert_page;
+    int n_tuples_since_last_checkpoint; // (does not include the tuples in the insert page)
+} PineconeBufferMetaPageData;
+typedef PineconeBufferMetaPageData *PineconeBufferMetaPage;
+
+
+typedef struct PineconeBufferOpaqueData
+{
+    BlockNumber nextblkno;
+    BlockNumber prev_checkpoint_blkno;
+
+    // checkpoints for uploading and checking liveness
+    PineconeCheckpoint checkpoint;
+} PineconeBufferOpaqueData;
+typedef PineconeBufferOpaqueData *PineconeBufferOpaque;
 
 
 // GUC variables
@@ -150,7 +154,7 @@ bool pinecone_insert(Relation index, Datum *values, bool *isnull, ItemPointer he
                      bool indexUnchanged, 
 #endif
                      IndexInfo *indexInfo);
-void AdvancePineconeTail(Relation index);
+void FlushToPinecone(Relation index);
 cJSON* get_fetch_ids(PineconeBufferMetaPageData buffer_meta);
 void AdvanceLivenessTail(Relation index, cJSON* fetched_ids);
 
@@ -161,6 +165,10 @@ void pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderb
 void load_buffer_into_sort(Relation index, PineconeScanOpaque so, Datum query_datum, TupleDesc index_tupdesc);
 bool pinecone_gettuple(IndexScanDesc scan, ScanDirection dir);
 void no_endscan(IndexScanDesc scan);
+PineconeCheckpoint* get_checkpoints_to_fetch(Relation index);
+PineconeCheckpoint get_best_fetched_checkpoint(Relation index, PineconeCheckpoint* checkpoints, cJSON* fetch_results);
+cJSON *fetch_ids_from_checkpoints(PineconeCheckpoint *checkpoints);
+
 
 
 // vacuum
@@ -184,7 +192,12 @@ ItemPointerData pinecone_id_get_heap_tid(char *id);
 PineconeStaticMetaPageData GetStaticMetaPageData(Relation index);
 PineconeStaticMetaPageData PineconeSnapshotStaticMeta(Relation index);
 PineconeBufferMetaPageData PineconeSnapshotBufferMeta(Relation index);
-void set_pinecone_page(Relation index, BlockNumber page, int n_new_tuples, ItemPointerData representative_vector_heap_tid);
+PineconeBufferOpaqueData PineconeSnapshotBufferOpaque(Relation index, BlockNumber blkno);
+void set_buffer_meta_page(Relation index, PineconeCheckpoint* ready_checkpoint, PineconeCheckpoint* flush_checkpoint, PineconeCheckpoint* latest_checkpoint, BlockNumber* insert_page, int* n_tuples_since_last_checkpoint);
+char* checkpoint_to_string(PineconeCheckpoint checkpoint);
+char* buffer_meta_to_string(PineconeBufferMetaPageData buffer_meta);
+char* buffer_opaque_to_string(PineconeBufferOpaqueData buffer_opaque);
+void print_relation(Relation index);
 
 // misc.
 

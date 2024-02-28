@@ -114,30 +114,102 @@ PineconeBufferMetaPageData PineconeSnapshotBufferMeta(Relation index)
     UnlockReleaseBuffer(buf);
     return *metap;
 }
-    
 
-// todo: we don't really want to have specific functions for each modification
-void set_pinecone_page(Relation index, BlockNumber page, int n_new_tuples, ItemPointerData representative_vector_heap_tid) {
+PineconeBufferOpaqueData PineconeSnapshotBufferOpaque(Relation index, BlockNumber blkno)
+{
+    Buffer buf;
+    Page page;
+    PineconeBufferOpaque opaque;
+    buf = ReadBuffer(index, blkno);
+    LockBuffer(buf, BUFFER_LOCK_SHARE);
+    page = BufferGetPage(buf);
+    opaque = PineconePageGetOpaque(page);
+    UnlockReleaseBuffer(buf);
+    return *opaque;
+}
+
+/*
+ * Acquire the buffer's meta page and update its fields.
+ */
+void set_buffer_meta_page(Relation index, PineconeCheckpoint* ready_checkpoint, PineconeCheckpoint* flush_checkpoint, PineconeCheckpoint* latest_checkpoint, BlockNumber* insert_page, int* n_tuples_since_last_checkpoint) {
+    Buffer buffer_meta_buf;
     Page buffer_meta_page;
     PineconeBufferMetaPage buffer_meta;
-    Buffer buffer_meta_buf = ReadBuffer(index, PINECONE_BUFFER_METAPAGE_BLKNO);
+
+    // start WAL logging
     GenericXLogState* state = GenericXLogStart(index);
-    // get Buffer's MetaPage
+
+    // get the meta page
+    buffer_meta_buf = ReadBuffer(index, PINECONE_BUFFER_METAPAGE_BLKNO);
     LockBuffer(buffer_meta_buf, BUFFER_LOCK_EXCLUSIVE);
     buffer_meta_page = GenericXLogRegisterBuffer(state, buffer_meta_buf, 0); 
     buffer_meta = PineconePageGetBufferMeta(buffer_meta_page);
-    // update pinecone page and stats
-    buffer_meta->n_pinecone_tuples += n_new_tuples;
-    buffer_meta->pinecone_page = page;
-    // add to checkpoints list
-    for (int i = 0; i < PINECONE_N_CHECKPOINTS; i++) {
-        if (buffer_meta->checkpoints[i].page == InvalidBlockNumber) {
-            buffer_meta->checkpoints[i].page = page;
-            buffer_meta->checkpoints[i].representative_tid = representative_vector_heap_tid;
-            break;
-        }
+
+    // update the buffer meta page
+    // checkpoints
+    if (ready_checkpoint != NULL) {
+        buffer_meta->ready_checkpoint = *ready_checkpoint;
     }
-    // save
-    UnlockReleaseBuffer(buffer_meta_buf);
+    if (flush_checkpoint != NULL) {
+        buffer_meta->flush_checkpoint = *flush_checkpoint;
+    }
+    if (latest_checkpoint != NULL) {
+        buffer_meta->latest_checkpoint = *latest_checkpoint;
+    }
+    // insert page
+    if (insert_page != NULL) {
+        buffer_meta->insert_page = *insert_page;
+    }
+    // n_tuples_since_last_checkpoint
+    if (n_tuples_since_last_checkpoint != NULL) {
+        buffer_meta->n_tuples_since_last_checkpoint = *n_tuples_since_last_checkpoint;
+    }
+
+
+    // save and release
     GenericXLogFinish(state);
+    UnlockReleaseBuffer(buffer_meta_buf);
 }
+
+char* checkpoint_to_string(PineconeCheckpoint checkpoint) {
+    char* str = palloc(200);
+    if (checkpoint.is_checkpoint) {
+        snprintf(str, 200, "checkpoint: no %d, blkno %d, tid %s, n_preceding_tuples %d", checkpoint.checkpoint_no, checkpoint.blkno, pinecone_id_from_heap_tid(checkpoint.tid), checkpoint.n_preceding_tuples);
+    } else {
+        snprintf(str, 200, "checkpoint: invalid");
+    }
+    return str;
+}
+
+char* buffer_meta_to_string(PineconeBufferMetaPageData buffer_meta) {
+    char* str = palloc(200);
+    // show reach of ready, flush and latest checkpoints on a separate line
+    // show insert page and n_tuples_since_last_checkpoint
+    snprintf(str, 200, "ready: %s\nflush: %s\nlatest: %s\ninsert page: %d\nn_tuples_since_last_checkpoint: %d", 
+        checkpoint_to_string(buffer_meta.ready_checkpoint), checkpoint_to_string(buffer_meta.flush_checkpoint), checkpoint_to_string(buffer_meta.latest_checkpoint), buffer_meta.insert_page, buffer_meta.n_tuples_since_last_checkpoint);
+    return str;
+}
+
+char* buffer_opaque_to_string(PineconeBufferOpaqueData buffer_opaque) {
+    char* str = palloc(200);
+    snprintf(str, 200, "nextblkno: %d, prev_checkpoint_blkno: %d, checkpoint: %s", buffer_opaque.nextblkno, buffer_opaque.prev_checkpoint_blkno, checkpoint_to_string(buffer_opaque.checkpoint));
+    return str;
+}   
+
+void print_relation(Relation index) {
+    // print each page of the relation for debugging
+
+    // print the static meta page and the buffer meta page
+    PineconeStaticMetaPageData static_meta = PineconeSnapshotStaticMeta(index);
+    PineconeBufferMetaPageData buffer_meta = PineconeSnapshotBufferMeta(index);
+    elog(INFO, "Static Meta Page: %d dimensions, %s metric, %s host, %s index name",
+         static_meta.dimensions, vector_metric_to_pinecone_metric[static_meta.metric], static_meta.host, static_meta.pinecone_index_name);
+    elog(INFO, "Buffer Meta Page: %s", buffer_meta_to_string(buffer_meta));
+
+    // print the buffer opaque data for each page
+    for (BlockNumber blkno = PINECONE_BUFFER_HEAD_BLKNO; blkno < RelationGetNumberOfBlocks(index); blkno++) {
+        PineconeBufferOpaqueData buffer_opaque = PineconeSnapshotBufferOpaque(index, blkno);
+        elog(INFO, "Buffer Opaque Page %d: %s", blkno, buffer_opaque_to_string(buffer_opaque));
+    }
+}
+

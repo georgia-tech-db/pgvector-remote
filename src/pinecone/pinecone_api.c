@@ -147,16 +147,13 @@ cJSON** pinecone_query_with_fetch(const char *api_key, const char *index_host, c
     return responses;
 }
 
-cJSON* pinecone_bulk_upsert_with_fetch(const char *api_key, const char *index_host, cJSON *vectors, int batch_size, bool with_fetch, cJSON* fetch_ids) {
+cJSON* pinecone_bulk_upsert(const char *api_key, const char *index_host, cJSON *vectors, int batch_size) {
     cJSON *batches = batch_vectors(vectors, batch_size);
     cJSON *batch;
     CURLM *multi_handle = curl_multi_init();
     CURL* batch_handle;
-    CURL* fetch_handle;
-    cJSON* fetch_response;
     // todo we need to free the actual data in response_data
     ResponseData* response_data = palloc(sizeof(ResponseData) * cJSON_GetArraySize(batches));
-    ResponseData fetch_response_data = {NULL, 0};
     int running;
     int i = 0;
     cJSON_ArrayForEach(batch, batches) {
@@ -164,12 +161,6 @@ cJSON* pinecone_bulk_upsert_with_fetch(const char *api_key, const char *index_ho
         batch_handle = get_pinecone_upsert_handle(api_key, index_host, cJSON_Duplicate(batch, true), &response_data[i]); // TODO: figure out why i have to deepcopy // because batch goes out of scope
         curl_multi_add_handle(multi_handle, batch_handle);
         i++;
-    }
-
-    // add fetch handle
-    if (with_fetch) {
-        fetch_handle = get_pinecone_fetch_handle(api_key, index_host, fetch_ids, &fetch_response_data);
-        curl_multi_add_handle(multi_handle, fetch_handle);
     }
 
     // run the handles
@@ -188,12 +179,6 @@ cJSON* pinecone_bulk_upsert_with_fetch(const char *api_key, const char *index_ho
     curl_global_cleanup();
 
     // todo: check the responses from upsert
-
-    // parse the fetch response
-    if (with_fetch) {
-        fetch_response = cJSON_Parse(fetch_response_data.data);
-        return fetch_response;
-    }
 
     // todo: free the response.data
     return NULL;

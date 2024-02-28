@@ -20,10 +20,11 @@ static relopt_kind pinecone_relopt_kind;
 void PineconeInit(void)
 {
     pinecone_relopt_kind = add_reloption_kind();
+    // N.B. The default values are validated when the extension is created, so we have to provide a valid default
     add_string_reloption(pinecone_relopt_kind, "spec",
                             "Specification of the Pinecone Index. Refer to https://docs.pinecone.io/reference/create_index",
-                            "", 
-                            pinecone_spec_validator,
+                            "{\"serverless\":{\"cloud\":\"aws\",\"region\":\"us-west-2\"}}",
+                            &pinecone_spec_validator, 
                             AccessExclusiveLock);
     // todo: allow for specifying a hostname instead of asking to create it
     // todo: you can have a relopts_validator which validates the whole relopt set. This could be used to check that exactly one of spec or host is set
@@ -46,7 +47,7 @@ void PineconeInit(void)
                             20, 1, 100,
                             PGC_USERSET,
                             0, NULL, NULL, NULL);
-    DefineCustomIntVariable("pinecone.max_buffer_search", "Pinecone max buffer search", "Pinecone max buffer search",
+    DefineCustomIntVariable("pinecone.max_buffer_scan", "Pinecone max buffer search", "Pinecone max buffer search",
                             &pinecone_max_buffer_scan,
                             10000, 1, 100000,
                             PGC_USERSET,
