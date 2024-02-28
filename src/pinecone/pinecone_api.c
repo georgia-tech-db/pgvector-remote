@@ -65,7 +65,9 @@ cJSON* describe_index(const char *api_key, const char *index_name) {
 }
 
 cJSON* list_indexes(const char *api_key) {
-    return generic_pinecone_request(api_key, "https://api.pinecone.io/indexes", "GET", NULL);
+    cJSON* response_json;
+    response_json = generic_pinecone_request(api_key, "https://api.pinecone.io/indexes", "GET", NULL);
+    return cJSON_GetObjectItemCaseSensitive(response_json, "indexes");
 }
 
 cJSON* pinecone_delete_vectors(const char *api_key, const char *index_host, cJSON *ids) {
