@@ -143,50 +143,65 @@ void InitIndexPages(Relation index, VectorMetric metric, int dimensions, char *p
     PineconeStaticMetaPage pinecone_static_meta_page;
     PineconeBufferMetaPage pinecone_buffer_meta_page;
     PineconeBufferOpaque buffer_head_opaque;
+    PineconeCheckpoint default_checkpoint;
     GenericXLogState *state = GenericXLogStart(index);
+
+    // init default checkpoint
+    default_checkpoint.blkno = PINECONE_BUFFER_HEAD_BLKNO;
+    default_checkpoint.checkpoint_no = 0;
+    default_checkpoint.is_checkpoint = true;
+    default_checkpoint.n_preceding_tuples = 0;
 
     // Lock the relation for extension, not really necessary since this is called exactly once in build_index
     LockRelationForExtension(index, ExclusiveLock); 
 
     // CREATE THE STATIC META PAGE
-    meta_buf = ReadBufferExtended(index, forkNum, P_NEW, RBM_NORMAL, NULL);
-    Assert(BufferGetBlockNumber(meta_buf) == PINECONE_STATIC_METAPAGE_BLKNO);
+    meta_buf = ReadBufferExtended(index, forkNum, P_NEW, RBM_NORMAL, NULL); LockBuffer(meta_buf, BUFFER_LOCK_EXCLUSIVE);
+    if (BufferGetBlockNumber(meta_buf) != PINECONE_STATIC_METAPAGE_BLKNO) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("Pinecone static meta page block number mismatch")));
+    }
     meta_page = GenericXLogRegisterBuffer(state, meta_buf, GENERIC_XLOG_FULL_IMAGE);
-    PageInit(meta_page, BufferGetPageSize(meta_buf), sizeof(PineconeStaticMetaPageData)); // format as a page
+    PageInit(meta_page, BufferGetPageSize(meta_buf), 0); // format as a page
     pinecone_static_meta_page = PineconePageGetStaticMeta(meta_page);
     pinecone_static_meta_page->metric = metric;
     pinecone_static_meta_page->dimensions = dimensions;
-    // copy host and pinecone_index_name, checking for length
-    if (strlcpy(pinecone_static_meta_page->host, host, sizeof((PineconeStaticMetaPage) 0)) >= sizeof((PineconeStaticMetaPage) 0)) {
-        ereport(ERROR, (errcode(ERRCODE_NAME_TOO_LONG), errmsg("Host name too long"), errhint("The host name is %s... and is %d characters long. The maximum length is %d characters.", host, (int) strlen(host), (int) sizeof(pinecone_static_meta_page->host))));
-    }
-    if (strlcpy(pinecone_static_meta_page->pinecone_index_name, pinecone_index_name, sizeof((PineconeStaticMetaPage) 0)) >= sizeof((PineconeStaticMetaPage) 0)) {
-        ereport(ERROR, (errcode(ERRCODE_NAME_TOO_LONG), errmsg("Pinecone index name too long"), errhint("The pinecone index name is %s... and is %d characters long. The maximum length is %d characters.", pinecone_index_name, (int) strlen(pinecone_index_name), (int) sizeof(pinecone_static_meta_page->pinecone_index_name))));
-    }
+    // You must set pd_lower because GenericXLog ignores any changes in the free space between pd_lower and pd_upper
+    ((PageHeader) meta_page)->pd_lower = ((char *) pinecone_static_meta_page - (char *) meta_page) + sizeof(PineconeStaticMetaPageData);
 
-    // CREATE THE BUFFER HEAD
-    buffer_head_buf = ReadBufferExtended(index, forkNum, P_NEW, RBM_NORMAL, NULL);
-    Assert(BufferGetBlockNumber(buffer_head_buf) == PINECONE_BUFFER_HEAD_BLKNO);
-    buffer_head_page = GenericXLogRegisterBuffer(state, buffer_head_buf, GENERIC_XLOG_FULL_IMAGE);
-    PineconePageInit(buffer_head_page, BufferGetPageSize(buffer_head_buf));
-    buffer_head_opaque = PineconePageGetOpaque(buffer_head_page);
-    buffer_head_opaque->checkpoint.blkno = PINECONE_BUFFER_HEAD_BLKNO;
-    buffer_head_opaque->checkpoint.checkpoint_no = 0;
-    buffer_head_opaque->checkpoint.n_preceding_tuples = 0;
-    buffer_head_opaque->checkpoint.is_checkpoint = true;
+    // copy host and pinecone_index_name, checking for length
+    if (strlcpy(pinecone_static_meta_page->host, host, PINECONE_HOST_MAX_LENGTH) > PINECONE_HOST_MAX_LENGTH) {
+        ereport(ERROR, (errcode(ERRCODE_NAME_TOO_LONG), errmsg("Host name too long"),
+                        errhint("The host name is %s... and is %d characters long. The maximum length is %d characters.",
+                                host, (int) strlen(host), PINECONE_HOST_MAX_LENGTH)));
+    }
+    if (strlcpy(pinecone_static_meta_page->pinecone_index_name, pinecone_index_name, PINECONE_NAME_MAX_LENGTH) > PINECONE_NAME_MAX_LENGTH) {
+        ereport(ERROR, (errcode(ERRCODE_NAME_TOO_LONG), errmsg("Pinecone index name too long"),
+                        errhint("The pinecone index name is %s... and is %d characters long. The maximum length is %d characters.",
+                                pinecone_index_name, (int) strlen(pinecone_index_name), PINECONE_NAME_MAX_LENGTH)));
+    }
 
     // CREATE THE BUFFER META PAGE
-    buffer_meta_buf = ReadBufferExtended(index, forkNum, P_NEW, RBM_NORMAL, NULL);
+    buffer_meta_buf = ReadBufferExtended(index, forkNum, P_NEW, RBM_NORMAL, NULL); LockBuffer(buffer_meta_buf, BUFFER_LOCK_EXCLUSIVE);
     Assert(BufferGetBlockNumber(buffer_meta_buf) == PINECONE_BUFFER_METAPAGE_BLKNO);
     buffer_meta_page = GenericXLogRegisterBuffer(state, buffer_meta_buf, GENERIC_XLOG_FULL_IMAGE);
     PageInit(buffer_meta_page, BufferGetPageSize(buffer_meta_buf), sizeof(PineconeBufferMetaPageData)); // format as a page
     pinecone_buffer_meta_page = PineconePageGetBufferMeta(buffer_meta_page);
     // set head, pinecone_tail, and live_tail to START
-    pinecone_buffer_meta_page->ready_checkpoint = buffer_head_opaque->checkpoint;
-    pinecone_buffer_meta_page->flush_checkpoint = buffer_head_opaque->checkpoint;
-    pinecone_buffer_meta_page->latest_checkpoint = buffer_head_opaque->checkpoint;
+    pinecone_buffer_meta_page->ready_checkpoint = default_checkpoint;
+    pinecone_buffer_meta_page->flush_checkpoint = default_checkpoint;
+    pinecone_buffer_meta_page->latest_checkpoint = default_checkpoint;
     pinecone_buffer_meta_page->insert_page = PINECONE_BUFFER_HEAD_BLKNO;
     pinecone_buffer_meta_page->n_tuples_since_last_checkpoint = 0;
+    // adjust pd_lower 
+    ((PageHeader) buffer_meta_page)->pd_lower = ((char *) pinecone_buffer_meta_page - (char *) buffer_meta_page) + sizeof(PineconeBufferMetaPageData);
+
+    // CREATE THE BUFFER HEAD
+    buffer_head_buf = ReadBufferExtended(index, forkNum, P_NEW, RBM_NORMAL, NULL); LockBuffer(buffer_head_buf, BUFFER_LOCK_EXCLUSIVE);
+    Assert(BufferGetBlockNumber(buffer_head_buf) == PINECONE_BUFFER_HEAD_BLKNO);
+    buffer_head_page = GenericXLogRegisterBuffer(state, buffer_head_buf, GENERIC_XLOG_FULL_IMAGE);
+    PineconePageInit(buffer_head_page, BufferGetPageSize(buffer_head_buf));
+    buffer_head_opaque = PineconePageGetOpaque(buffer_head_page);
+    buffer_head_opaque->checkpoint = default_checkpoint;
 
     // cleanup
     GenericXLogFinish(state);
@@ -194,6 +209,8 @@ void InitIndexPages(Relation index, VectorMetric metric, int dimensions, char *p
     UnlockReleaseBuffer(buffer_meta_buf);
     UnlockReleaseBuffer(buffer_head_buf);
     UnlockRelationForExtension(index, ExclusiveLock);
+
+
 }
 
 

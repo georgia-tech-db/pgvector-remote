@@ -18,6 +18,7 @@ void PineconePageInit(Page page, Size pageSize)
     PageInit(page, pageSize, sizeof(PineconeBufferOpaqueData));
     opaque = PineconePageGetOpaque(page);
     opaque->nextblkno = InvalidBlockNumber;
+    opaque->prev_checkpoint_blkno = InvalidBlockNumber;
     opaque->checkpoint.is_checkpoint = false;
     // checkpoint
     // ItemPointerSetInvalid
@@ -86,6 +87,9 @@ bool AppendBufferTuple(Relation index, Datum *values, bool *isnull, ItemPointer 
     // add item to insert page
     if (!full && !create_checkpoint) {
         PageAddItem(insert_page, (Item) itup, itemsz, InvalidOffsetNumber, false, false);
+        // log the number of items on this page MaxOffsetNumber
+        elog(DEBUG1, "No new page! Page has %d items", PageGetMaxOffsetNumber(insert_page));
+
         // release insert_page
         GenericXLogFinish(state);
         UnlockReleaseBuffer(insert_buf);
@@ -168,8 +172,12 @@ bool pinecone_insert(Relation index, Datum *values, bool *isnull, ItemPointer he
 
     // if there are enough tuples in the buffer, advance the pinecone tail
     if (checkpoint_created) {
+        elog(DEBUG1, "Checkpoint created. Flushing to Pinecone");
         FlushToPinecone(index);
+        pinecone_print_relation(index);
     }
+
+    // log the state of the relation for debugging
 
     return false;
 }

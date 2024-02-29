@@ -216,7 +216,7 @@ CURL* get_pinecone_upsert_handle(const char *api_key, const char *index_host, cJ
 
 CURL* get_pinecone_fetch_handle(const char *api_key, const char *index_host, cJSON* ids, ResponseData* response_data) {
     CURL* hnd  = curl_easy_init();
-    char url[400] = "https://"; // we fetch up to 20 vectors and have 12 chars per vector id + &ids= is 17chars/vec
+    char url[2048] = "https://"; // we fetch up to 100 vectors and have 12 chars per vector id + &ids= is 17chars/vec
     strcat(url, index_host); strcat(url, "/vectors/fetch?"); // https://t1-23kshha.svc.apw5-4e34-81fa.pinecone.io/vectors/upsert
     cJSON_ArrayForEach(ids, ids) {
         strcat(url, "ids=");

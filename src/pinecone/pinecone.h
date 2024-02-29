@@ -31,6 +31,7 @@
 // pinecone specific limits
 
 #define PINECONE_NAME_MAX_LENGTH 45
+#define PINECONE_HOST_MAX_LENGTH 100
 
 // structs
 typedef struct PineconeScanOpaqueData
@@ -48,7 +49,6 @@ typedef struct PineconeScanOpaqueData
 
     // support functions
     FmgrInfo *procinfo;
-    Oid collation; 
 
     // results
     cJSON* pinecone_results;
@@ -61,8 +61,8 @@ extern const char* vector_metric_to_pinecone_metric[VECTOR_METRIC_COUNT];
 typedef struct PineconeStaticMetaPageData
 {
     int dimensions;
-    char host[100];
-    char pinecone_index_name[60];
+    char host[PINECONE_HOST_MAX_LENGTH + 1];
+    char pinecone_index_name[PINECONE_NAME_MAX_LENGTH + 1];
     VectorMetric metric;
 } PineconeStaticMetaPageData;
 typedef PineconeStaticMetaPageData *PineconeStaticMetaPage;
@@ -117,9 +117,10 @@ typedef PineconeBufferOpaqueData *PineconeBufferOpaque;
 extern char* pinecone_api_key;
 extern int pinecone_top_k;
 extern int pinecone_vectors_per_request;
-extern int pinecone_concurrent_requests;
+extern int pinecone_requests_per_batch;
 extern int pinecone_max_buffer_scan;
-#define PINECONE_BATCH_SIZE pinecone_vectors_per_request * pinecone_concurrent_requests
+extern int pinecone_max_fetched_vectors_for_liveness_check;
+#define PINECONE_BATCH_SIZE pinecone_vectors_per_request * pinecone_requests_per_batch
 
 // function declarations
 
@@ -155,8 +156,6 @@ bool pinecone_insert(Relation index, Datum *values, bool *isnull, ItemPointer he
 #endif
                      IndexInfo *indexInfo);
 void FlushToPinecone(Relation index);
-cJSON* get_fetch_ids(PineconeBufferMetaPageData buffer_meta);
-void AdvanceLivenessTail(Relation index, cJSON* fetched_ids);
 
 // scan
 IndexScanDesc pinecone_beginscan(Relation index, int nkeys, int norderbys);
@@ -189,7 +188,6 @@ cJSON* index_tuple_get_pinecone_vector(Relation index, IndexTuple itup);
 char* pinecone_id_from_heap_tid(ItemPointerData heap_tid);
 ItemPointerData pinecone_id_get_heap_tid(char *id);
 // read and write meta pages
-PineconeStaticMetaPageData GetStaticMetaPageData(Relation index);
 PineconeStaticMetaPageData PineconeSnapshotStaticMeta(Relation index);
 PineconeBufferMetaPageData PineconeSnapshotBufferMeta(Relation index);
 PineconeBufferOpaqueData PineconeSnapshotBufferOpaque(Relation index, BlockNumber blkno);
@@ -197,7 +195,11 @@ void set_buffer_meta_page(Relation index, PineconeCheckpoint* ready_checkpoint, 
 char* checkpoint_to_string(PineconeCheckpoint checkpoint);
 char* buffer_meta_to_string(PineconeBufferMetaPageData buffer_meta);
 char* buffer_opaque_to_string(PineconeBufferOpaqueData buffer_opaque);
-void print_relation(Relation index);
+void pinecone_print_relation(Relation index);
+
+// helpers
+Oid get_index_oid_from_name(char* index_name);
+
 
 // misc.
 

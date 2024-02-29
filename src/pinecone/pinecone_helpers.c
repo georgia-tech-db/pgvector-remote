@@ -177,3 +177,44 @@ pinecone_delete_unused_indexes(PG_FUNCTION_ARGS) {
     }
     PG_RETURN_INT32(deleted);
 }
+
+// I need a way to go from an index name to an index oid: I can do this by querying the pg_class table
+Oid get_index_oid_from_name(char* index_name) {
+    Oid index_oid;
+    char query[256];
+    int ret;
+    sprintf(query, "SELECT oid FROM pg_class WHERE relname = '%s' AND relkind = 'i';", index_name);
+    SPI_connect();
+    ret = SPI_execute(query, false, 0);
+    if (ret == SPI_OK_SELECT && SPI_processed > 0) {
+        TupleDesc tupdesc = SPI_tuptable->tupdesc;
+        SPITupleTable *tuptable = SPI_tuptable;
+        HeapTuple tuple = tuptable->vals[0];
+        bool isnull;
+        Datum datum = heap_getattr(tuple, 1, tupdesc, &isnull);
+        if (!isnull) {
+            index_oid = DatumGetObjectId(datum);
+        }
+    } else {
+        elog(ERROR, "Failed to execute query");
+    }
+    SPI_finish();
+    return index_oid;
+}
+
+PGDLLEXPORT PG_FUNCTION_INFO_V1(pinecone_print_index);
+Datum
+pinecone_print_index(PG_FUNCTION_ARGS) {
+    char* index_name;
+    Oid index_oid;
+    Relation index;
+    index_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    elog(NOTICE, "Index name: %s", index_name);
+    index_oid = get_index_oid_from_name(index_name);
+    elog(NOTICE, "Index oid: %u", index_oid);
+    index = index_open(index_oid, AccessShareLock);
+    elog(NOTICE, "Index: %d", index->rd_index->indrelid);
+    pinecone_print_relation(index);
+    index_close(index, AccessShareLock);
+    PG_RETURN_VOID();
+}

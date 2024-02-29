@@ -11,8 +11,9 @@
 char* pinecone_api_key = NULL;
 int pinecone_top_k = 1000;
 int pinecone_vectors_per_request = 100;
-int pinecone_concurrent_requests = 20;
+int pinecone_requests_per_batch = 20;
 int pinecone_max_buffer_scan = 10000; // maximum number of tuples to search in the buffer
+int pinecone_max_fetched_vectors_for_liveness_check = 10;
 
 // todo: principled batch sizes. Do we ever want the buffer to be bigger than a multi-insert? Possibly if we want to let the buffer fill up when the remote index is down.
 static relopt_kind pinecone_relopt_kind;
@@ -42,14 +43,19 @@ void PineconeInit(void)
                             100, 1, 1000,
                             PGC_USERSET,
                             0, NULL, NULL, NULL);
-    DefineCustomIntVariable("pinecone.concurrent_requests", "Pinecone concurrent requests", "Pinecone concurrent requests",
-                            &pinecone_concurrent_requests,
+    DefineCustomIntVariable("pinecone.requests_per_batch", "Pinecone requests per batch", "Pinecone requests per batch",
+                            &pinecone_requests_per_batch,
                             20, 1, 100,
                             PGC_USERSET,
                             0, NULL, NULL, NULL);
     DefineCustomIntVariable("pinecone.max_buffer_scan", "Pinecone max buffer search", "Pinecone max buffer search",
                             &pinecone_max_buffer_scan,
                             10000, 1, 100000,
+                            PGC_USERSET,
+                            0, NULL, NULL, NULL);
+    DefineCustomIntVariable("pinecone.max_fetched_vectors_for_liveness_check", "Pinecone max fetched vectors for liveness check", "Pinecone max fetched vectors for liveness check",
+                            &pinecone_max_fetched_vectors_for_liveness_check,
+                            10, 1, 100, // more than 100 is useless and won't fit in the 2048 chars allotted for the URL
                             PGC_USERSET,
                             0, NULL, NULL, NULL);
     MarkGUCPrefixReserved("pinecone");
