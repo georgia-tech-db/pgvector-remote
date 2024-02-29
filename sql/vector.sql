@@ -127,6 +127,9 @@ CREATE FUNCTION pinecone_indexes() RETURNS SETOF pinecone_index_stats
 CREATE FUNCTION pinecone_delete_unused_indexes() RETURNS int4
 	AS 'MODULE_PATHNAME' LANGUAGE C VOLATILE STRICT PARALLEL SAFE;
 
+CREATE FUNCTION pinecone_print_index(text) RETURNS int4
+	AS 'MODULE_PATHNAME' LANGUAGE C VOLATILE STRICT PARALLEL SAFE;
+
 -- aggregates
 
 CREATE AGGREGATE avg(vector) (

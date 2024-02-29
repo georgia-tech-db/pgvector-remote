@@ -7,7 +7,7 @@
 #include "fmgr.h"
 #include "hnsw.h"
 #include "ivfflat.h"
-#include "pinecone.h"
+#include "pinecone/pinecone.h"
 #include "lib/stringinfo.h"
 #include "libpq/pqformat.h"
 #include "port.h"				/* for strtof() */
