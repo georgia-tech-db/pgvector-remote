@@ -1,10 +1,15 @@
 #include "pinecone_api.h"
 #include "postgres.h"
+#include "connection_pool.c"
 
 #include <stdio.h>
 #include <string.h>
 #include <curl/curl.h>
 #include "src/cJSON.h"
+
+void pinecone_api_init() {
+    connection_pool = connectionPoolInit();
+}
 
 size_t write_callback(char *contents, size_t size, size_t nmemb, void *userdata) {
     size_t real_size = size * nmemb; // Size of the response
@@ -43,7 +48,7 @@ void set_curl_options(CURL *hnd, const char *api_key, const char *url, const cha
 }
 
 cJSON* generic_pinecone_request(const char *api_key, const char *url, const char *method, cJSON *body) {
-    CURL *hnd = curl_easy_init();
+    CURL *hnd = getConnection(connection_pool);
     ResponseData response_data = {NULL, 0};
     cJSON *response_json;
     set_curl_options(hnd, api_key, url, method, &response_data);

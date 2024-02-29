@@ -3,6 +3,7 @@
 
 #include <curl/curl.h>
 #include "src/cJSON.h"
+#include "connection_pool.h"
 
 #define bool _Bool
 
@@ -12,6 +13,8 @@ typedef struct {
     char *data;
     size_t length;
 } ResponseData;
+
+extern ConnectionPool* connection_pool;
 
 size_t write_callback(char *contents, size_t size, size_t nmemb, void *userdata);
 struct curl_slist *create_common_headers(const char *api_key);
@@ -29,5 +32,6 @@ CURL* get_pinecone_query_handle(const char *api_key, const char *index_host, con
 CURL* get_pinecone_upsert_handle(const char *api_key, const char *index_host, cJSON *vectors, ResponseData* response_data);
 CURL* get_pinecone_fetch_handle(const char *api_key, const char *index_host, cJSON* ids, ResponseData* response_data);
 cJSON* batch_vectors(cJSON *vectors, int batch_size);
+void pinecone_api_init();
 
 #endif // PINECONE_API_H
