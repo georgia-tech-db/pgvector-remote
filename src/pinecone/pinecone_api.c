@@ -6,6 +6,10 @@
 #include <curl/curl.h>
 #include "src/cJSON.h"
 
+#include <time.h>
+
+
+
 size_t write_callback(char *contents, size_t size, size_t nmemb, void *userdata) {
     size_t real_size = size * nmemb; // Size of the response
     ResponseData *response_data = (ResponseData *)userdata; // Cast the userdata to the specific structure
@@ -83,6 +87,13 @@ cJSON* pinecone_delete_index(const char *api_key, const char *index_name) {
     return generic_pinecone_request(api_key, url, "DELETE", NULL);
 }
 
+// delete all vectors in an index
+cJSON* pinecone_delete_all(const char *api_key, const char *index_host) {
+    char url[300];
+    sprintf(url, "https://%s/vectors/delete", index_host);
+    return generic_pinecone_request(api_key, url, "POST", cJSON_Parse("{\"deleteAll\": true}"));
+}
+
 cJSON* pinecone_list_vectors(const char *api_key, const char *index_host, int limit, char* pagination_token) {
     char url[300];
     if (pagination_token != NULL) {
@@ -113,6 +124,7 @@ cJSON** pinecone_query_with_fetch(const char *api_key, const char *index_host, c
     cJSON** responses = palloc(2 * sizeof(cJSON*)); // allocate space to return two cJSON* pointers for the query and fetch responses
     ResponseData query_response_data = {NULL, 0};
     ResponseData fetch_response_data = {NULL, 0};
+    clock_t start, stop;
     int running;
 
     query_handle = get_pinecone_query_handle(api_key, index_host, topK, query_vector_values, filter, &query_response_data);
@@ -125,6 +137,8 @@ cJSON** pinecone_query_with_fetch(const char *api_key, const char *index_host, c
 
     // todo: does curl let you specify an allocator like cJSON?
 
+    // start time
+    start = clock();
     // run the handles
     curl_multi_perform(multi_handle, &running);
     while (running) {
@@ -139,6 +153,10 @@ cJSON** pinecone_query_with_fetch(const char *api_key, const char *index_host, c
     }
     curl_multi_cleanup(multi_handle);  // TODO iterate thru and cleanup handles.
     curl_global_cleanup();
+    // stop time
+    stop = clock();
+    elog(NOTICE, "Query and fetch took %f seconds", (double)(stop - start) / CLOCKS_PER_SEC);
+
 
     // parse the responses
     responses[0] = cJSON_Parse(query_response_data.data);
@@ -187,7 +205,7 @@ cJSON* pinecone_bulk_upsert(const char *api_key, const char *index_host, cJSON *
 }
 
 CURL* get_pinecone_query_handle(const char *api_key, const char *index_host, const int topK, cJSON *query_vector_values, cJSON *filter, ResponseData* response_data) {
-    CURL *hnd = curl_easy_init();
+    static CURL *hnd;
     cJSON *body = cJSON_CreateObject();
     char url[100] = "https://"; strcat(url, index_host); strcat(url, "/query"); // e.g. https://t1-23kshha.svc.apw5-4e34-81fa.pinecone.io/query
     cJSON_AddItemToObject(body, "topK", cJSON_CreateNumber(topK));
@@ -196,6 +214,7 @@ CURL* get_pinecone_query_handle(const char *api_key, const char *index_host, con
     cJSON_AddItemToObject(body, "includeValues", cJSON_CreateFalse());
     cJSON_AddItemToObject(body, "includeMetadata", cJSON_CreateFalse());
     elog(DEBUG1, "Querying index %s with payload: %s", index_host, cJSON_Print(body));
+    hnd = curl_easy_init();
     set_curl_options(hnd, api_key, url, "POST", response_data);
     curl_easy_setopt(hnd, CURLOPT_POSTFIELDS, cJSON_Print(body));
     return hnd;
@@ -215,7 +234,7 @@ CURL* get_pinecone_upsert_handle(const char *api_key, const char *index_host, cJ
 }
 
 CURL* get_pinecone_fetch_handle(const char *api_key, const char *index_host, cJSON* ids, ResponseData* response_data) {
-    CURL* hnd  = curl_easy_init();
+    static CURL* hnd;
     char url[2048] = "https://"; // we fetch up to 100 vectors and have 12 chars per vector id + &ids= is 17chars/vec
     strcat(url, index_host); strcat(url, "/vectors/fetch?"); // https://t1-23kshha.svc.apw5-4e34-81fa.pinecone.io/vectors/upsert
     cJSON_ArrayForEach(ids, ids) {
@@ -224,6 +243,7 @@ CURL* get_pinecone_fetch_handle(const char *api_key, const char *index_host, cJS
         strcat(url, "&");
     }
     url[strlen(url) - 1] = '\0'; // remove the trailing &
+    hnd = curl_easy_init();
     set_curl_options(hnd, api_key, url, "GET", response_data);
     return hnd;
 }
