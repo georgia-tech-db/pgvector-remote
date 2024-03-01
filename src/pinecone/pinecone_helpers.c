@@ -150,7 +150,8 @@ pinecone_delete_unused_indexes(PG_FUNCTION_ARGS) {
         // deform pinecone_index_name back into index_name, index_oid
         // pinecone_index_name has format ("pgvector-%u-%s-%s", index->rd_id, index_name random_postfix)
         if (sscanf(pinecone_index_name, "pgvector-%u-", &index_oid) != 1) {
-            ereport(ERROR, (errmsg("Failed to parse index name: %s", pinecone_index_name)));
+            ereport(NOTICE, (errmsg("Failed to parse index name: %s", pinecone_index_name)));
+            continue;
         }
 
         // check if the index's oid exists in pg_class 
@@ -216,5 +217,6 @@ pinecone_print_index(PG_FUNCTION_ARGS) {
     elog(NOTICE, "Index: %d", index->rd_index->indrelid);
     pinecone_print_relation(index);
     index_close(index, AccessShareLock);
+    elog(NOTICE, "Index closed");
     PG_RETURN_VOID();
 }

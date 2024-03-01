@@ -33,6 +33,9 @@
 #define PINECONE_NAME_MAX_LENGTH 45
 #define PINECONE_HOST_MAX_LENGTH 100
 
+#define DEFAULT_SPEC "{}"
+#define DEFAULT_HOST ""
+
 // structs
 typedef struct PineconeScanOpaqueData
 {
@@ -77,6 +80,9 @@ typedef struct PineconeOptions
 {
 	int32		vl_len_;		/* varlena header (do not touch directly!) */
     int         spec; // spec is a string; this is its offset in the rd_options
+    int         host;
+    bool        overwrite; // todo: should this be int?
+    bool        skip_build;
 }			PineconeOptions;
 
 typedef struct PineconeCheckpoint
@@ -177,6 +183,7 @@ IndexBulkDeleteResult *no_vacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteRe
 
 // validate
 void pinecone_spec_validator(const char *spec);
+void pinecone_host_validator(const char *spec);
 void validate_api_key(void);
 void validate_vector_nonzero(Vector* vector);
 bool no_validate(Oid opclassoid);

@@ -34,6 +34,11 @@ void pinecone_spec_validator(const char *spec)
     }
 }
 
+void pinecone_host_validator(const char *host)
+{
+    return;
+}
+
 
 bool no_validate(Oid opclassoid) { return true; }
 
