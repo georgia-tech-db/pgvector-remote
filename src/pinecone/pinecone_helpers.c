@@ -217,6 +217,29 @@ pinecone_print_index(PG_FUNCTION_ARGS) {
     elog(NOTICE, "Index: %d", index->rd_index->indrelid);
     pinecone_print_relation(index);
     index_close(index, AccessShareLock);
-    elog(NOTICE, "Index closed");
+    elog(NOTICE, "Index closed. (look no reload)");
+    PG_RETURN_VOID();
+}
+
+// pinecone_get_index_stats
+PGDLLEXPORT PG_FUNCTION_INFO_V1(pinecone_print_index_stats);
+Datum
+pinecone_print_index_stats(PG_FUNCTION_ARGS) {
+    char* index_name;
+    PineconeStaticMetaPageData meta;
+    cJSON* stats;
+    Oid index_oid;
+    Relation index;
+    index_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    elog(DEBUG1, "Index name: %s", index_name);
+    index_oid = get_index_oid_from_name(index_name);
+    elog(DEBUG1, "Index oid: %u", index_oid);
+    index = index_open(index_oid, AccessShareLock);
+    meta = PineconeSnapshotStaticMeta(index);
+    elog(DEBUG1, "host: %s", meta.host);
+    stats = pinecone_get_index_stats(pinecone_api_key, meta.host);
+    elog(DEBUG1, "Stats: %s", cJSON_Print(stats));
+    index_close(index, AccessShareLock);
+    elog(DEBUG1, "Index closed");
     PG_RETURN_VOID();
 }

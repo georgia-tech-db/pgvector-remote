@@ -46,15 +46,27 @@ void set_curl_options(CURL *hnd, const char *api_key, const char *url, const cha
     curl_easy_setopt(hnd, CURLOPT_WRITEFUNCTION, write_callback);
 }
 
+// Declare the CURL handle as a global variable
+CURL *hnd_t;
+
 cJSON* generic_pinecone_request(const char *api_key, const char *url, const char *method, cJSON *body) {
-    CURL *hnd = curl_easy_init();
+    // CURL *hnd = curl_easy_init();
     ResponseData response_data = {NULL, 0};
     cJSON *response_json;
-    set_curl_options(hnd, api_key, url, method, &response_data);
-    if (body != NULL) {
-        curl_easy_setopt(hnd, CURLOPT_POSTFIELDS, cJSON_Print(body));
+
+    if (hnd_t == NULL) {
+        elog(NOTICE, "Initializing CURL handle");
+        hnd_t = curl_easy_init();
+        if (hnd_t == NULL) {
+            elog(ERROR, "Failed to initialize CURL handle");
+        }
     }
-    curl_easy_perform(hnd);
+
+    set_curl_options(hnd_t, api_key, url, method, &response_data);
+    if (body != NULL) {
+        curl_easy_setopt(hnd_t, CURLOPT_POSTFIELDS, cJSON_Print(body));
+    }
+    curl_easy_perform(hnd_t);
     response_json = cJSON_Parse(response_data.data);
     return response_json;
 }
@@ -66,6 +78,17 @@ cJSON* generic_pinecone_request(const char *api_key, const char *url, const char
 cJSON* describe_index(const char *api_key, const char *index_name) {
     char url[100] = "https://api.pinecone.io/indexes/"; strcat(url, index_name);
     return generic_pinecone_request(api_key, url, "GET", NULL);
+}
+
+cJSON* pinecone_get_index_stats(const char *api_key, const char *index_host) {
+    cJSON* resp;
+    clock_t start, stop;
+    char url[100] = "https://"; strcat(url, index_host); strcat(url, "/describe_index_stats");
+    start = clock();
+    resp = generic_pinecone_request(api_key, url, "GET", NULL);
+    stop = clock();
+    elog(NOTICE, "Getting index stats took %f seconds (praying)", (double)(stop - start) / CLOCKS_PER_SEC);
+    return resp;
 }
 
 cJSON* list_indexes(const char *api_key) {
@@ -118,21 +141,28 @@ cJSON* pinecone_create_index(const char *api_key, const char *index_name, const 
     return generic_pinecone_request(api_key, "https://api.pinecone.io/indexes", "POST", request);
 }
 
+CURL* multi_hnd_for_query;
 cJSON** pinecone_query_with_fetch(const char *api_key, const char *index_host, const int topK, cJSON *query_vector_values, cJSON *filter, bool with_fetch, cJSON* fetch_ids) {
-    CURLM *multi_handle = curl_multi_init();
     CURL *query_handle, *fetch_handle;
     cJSON** responses = palloc(2 * sizeof(cJSON*)); // allocate space to return two cJSON* pointers for the query and fetch responses
     ResponseData query_response_data = {NULL, 0};
     ResponseData fetch_response_data = {NULL, 0};
     clock_t start, stop;
     int running;
+    if (multi_hnd_for_query == NULL) {
+        elog(NOTICE, "Initializing CURL multi handle for QUERY");
+        multi_hnd_for_query = curl_multi_init();
+        if (multi_hnd_for_query == NULL) {
+            elog(ERROR, "Failed to initialize CURL multi handle");
+        }
+    }
 
     query_handle = get_pinecone_query_handle(api_key, index_host, topK, query_vector_values, filter, &query_response_data);
-    curl_multi_add_handle(multi_handle, query_handle);
+    curl_multi_add_handle(multi_hnd_for_query, query_handle);
 
     if (with_fetch) {
         fetch_handle = get_pinecone_fetch_handle(api_key, index_host, fetch_ids, &fetch_response_data);
-        curl_multi_add_handle(multi_handle, fetch_handle);
+        curl_multi_add_handle(multi_hnd_for_query, fetch_handle);
     }
 
     // todo: does curl let you specify an allocator like cJSON?
@@ -140,19 +170,19 @@ cJSON** pinecone_query_with_fetch(const char *api_key, const char *index_host, c
     // start time
     start = clock();
     // run the handles
-    curl_multi_perform(multi_handle, &running);
+    curl_multi_perform(multi_hnd_for_query, &running);
     while (running) {
         CURLMcode mc;
         int numfds;
-        mc = curl_multi_wait(multi_handle, NULL, 0, 8000, &numfds);
+        mc = curl_multi_wait(multi_hnd_for_query, NULL, 0, 8000, &numfds);
         if (mc != CURLM_OK) {
             elog(DEBUG1, "curl_multi_wait() failed, code %d.", mc);
             break;
         }
-        curl_multi_perform(multi_handle, &running);
+        curl_multi_perform(multi_hnd_for_query, &running);
     }
-    curl_multi_cleanup(multi_handle);  // TODO iterate thru and cleanup handles.
-    curl_global_cleanup();
+    // curl_multi_cleanup(multi_hnd_for_query);  // TODO iterate thru and cleanup handles.
+    // TODO: figure out exactly what is necessary: deleting multi_cleanup or reusing the same multihandle
     // stop time
     stop = clock();
     elog(NOTICE, "Query and fetch took %f seconds", (double)(stop - start) / CLOCKS_PER_SEC);
@@ -167,15 +197,22 @@ cJSON** pinecone_query_with_fetch(const char *api_key, const char *index_host, c
     return responses;
 }
 
+CURL* multi_handle;
 cJSON* pinecone_bulk_upsert(const char *api_key, const char *index_host, cJSON *vectors, int batch_size) {
     cJSON *batches = batch_vectors(vectors, batch_size);
     cJSON *batch;
-    CURLM *multi_handle = curl_multi_init();
     CURL* batch_handle;
-    // todo we need to free the actual data in response_data
     ResponseData* response_data = palloc(sizeof(ResponseData) * cJSON_GetArraySize(batches));
     int running;
     int i = 0;
+    if (multi_handle == NULL) {
+        elog(NOTICE, "Initializing CURL multi handle for BULK");
+        multi_handle = curl_multi_init();
+        if (multi_handle == NULL) {
+            elog(ERROR, "Failed to initialize CURL multi handle");
+        }
+    }
+    // todo we need to free the actual data in response_data
     cJSON_ArrayForEach(batch, batches) {
         response_data[i] = (ResponseData) {NULL, 0};
         batch_handle = get_pinecone_upsert_handle(api_key, index_host, cJSON_Duplicate(batch, true), &response_data[i]); // TODO: figure out why i have to deepcopy // because batch goes out of scope
@@ -195,8 +232,8 @@ cJSON* pinecone_bulk_upsert(const char *api_key, const char *index_host, cJSON *
         }
         curl_multi_perform(multi_handle, &running);
     }
-    curl_multi_cleanup(multi_handle);  // TODO iterate thru and cleanup handles.
-    curl_global_cleanup();
+    // curl_multi_cleanup(multi_handle);  // TODO iterate thru and cleanup handles.
+    // curl_global_cleanup();
 
     // todo: check the responses from upsert
 
@@ -204,20 +241,27 @@ cJSON* pinecone_bulk_upsert(const char *api_key, const char *index_host, cJSON *
     return NULL;
 }
 
+CURL* query_handle;
 CURL* get_pinecone_query_handle(const char *api_key, const char *index_host, const int topK, cJSON *query_vector_values, cJSON *filter, ResponseData* response_data) {
-    static CURL *hnd;
     cJSON *body = cJSON_CreateObject();
     char url[100] = "https://"; strcat(url, index_host); strcat(url, "/query"); // e.g. https://t1-23kshha.svc.apw5-4e34-81fa.pinecone.io/query
+    if (query_handle == NULL) {
+        elog(NOTICE, "Initializing CURL handle for QUERY");
+        query_handle = curl_easy_init();
+        if (query_handle == NULL) {
+            elog(ERROR, "Failed to initialize CURL handle");
+        }
+    }
     cJSON_AddItemToObject(body, "topK", cJSON_CreateNumber(topK));
     cJSON_AddItemToObject(body, "vector", query_vector_values);
     cJSON_AddItemToObject(body, "filter", filter);
     cJSON_AddItemToObject(body, "includeValues", cJSON_CreateFalse());
     cJSON_AddItemToObject(body, "includeMetadata", cJSON_CreateFalse());
     elog(DEBUG1, "Querying index %s with payload: %s", index_host, cJSON_Print(body));
-    hnd = curl_easy_init();
-    set_curl_options(hnd, api_key, url, "POST", response_data);
-    curl_easy_setopt(hnd, CURLOPT_POSTFIELDS, cJSON_Print(body));
-    return hnd;
+    query_handle = curl_easy_init();
+    set_curl_options(query_handle, api_key, url, "POST", response_data);
+    curl_easy_setopt(query_handle, CURLOPT_POSTFIELDS, cJSON_Print(body));
+    return query_handle;
 }
 
 CURL* get_pinecone_upsert_handle(const char *api_key, const char *index_host, cJSON *vectors, ResponseData* response_data) {
@@ -233,19 +277,26 @@ CURL* get_pinecone_upsert_handle(const char *api_key, const char *index_host, cJ
     return hnd;
 }
 
+CURL* fetch_handle;
 CURL* get_pinecone_fetch_handle(const char *api_key, const char *index_host, cJSON* ids, ResponseData* response_data) {
-    static CURL* hnd;
     char url[2048] = "https://"; // we fetch up to 100 vectors and have 12 chars per vector id + &ids= is 17chars/vec
     strcat(url, index_host); strcat(url, "/vectors/fetch?"); // https://t1-23kshha.svc.apw5-4e34-81fa.pinecone.io/vectors/upsert
+    if (fetch_handle == NULL) {
+        elog(NOTICE, "Initializing CURL handle for FETCH");
+        fetch_handle = curl_easy_init();
+        if (fetch_handle == NULL) {
+            elog(ERROR, "Failed to initialize CURL handle");
+        }
+    }
     cJSON_ArrayForEach(ids, ids) {
         strcat(url, "ids=");
         strcat(url, cJSON_GetStringValue(ids));
         strcat(url, "&");
     }
     url[strlen(url) - 1] = '\0'; // remove the trailing &
-    hnd = curl_easy_init();
-    set_curl_options(hnd, api_key, url, "GET", response_data);
-    return hnd;
+    fetch_handle = curl_easy_init();
+    set_curl_options(fetch_handle, api_key, url, "GET", response_data);
+    return fetch_handle;
 }
 
 cJSON* batch_vectors(cJSON *vectors, int batch_size) {
