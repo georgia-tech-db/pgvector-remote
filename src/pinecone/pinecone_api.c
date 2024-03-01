@@ -29,6 +29,7 @@ size_t write_callback(char *contents, size_t size, size_t nmemb, void *userdata)
         // free the request body
         elog(DEBUG1, "Freeing request body");
         free(response_data->request_body);
+        response_data->request_body = NULL; // do that subsequent calls to write_callback don't free the request body again
     }
 
     elog(DEBUG1, "Response (write_callback): %s", contents);
@@ -59,7 +60,7 @@ CURL *hnd_t;
 
 cJSON* generic_pinecone_request(const char *api_key, const char *url, const char *method, cJSON *body) {
     // CURL *hnd = curl_easy_init();
-    ResponseData response_data = {NULL, 0};
+    ResponseData response_data = {"", NULL, NULL, 0};
     cJSON *response_json;
 
     if (hnd_t == NULL) {
@@ -153,8 +154,8 @@ CURL* multi_hnd_for_query;
 cJSON** pinecone_query_with_fetch(const char *api_key, const char *index_host, const int topK, cJSON *query_vector_values, cJSON *filter, bool with_fetch, cJSON* fetch_ids) {
     CURL *query_handle, *fetch_handle;
     cJSON** responses = palloc(2 * sizeof(cJSON*)); // allocate space to return two cJSON* pointers for the query and fetch responses
-    ResponseData query_response_data = {NULL, 0};
-    ResponseData fetch_response_data = {NULL, 0};
+    ResponseData query_response_data = {"", NULL, NULL, 0};
+    ResponseData fetch_response_data = {"", NULL, NULL, 0};
     clock_t start, stop;
     int running;
     if (multi_hnd_for_query == NULL) {
@@ -232,7 +233,7 @@ cJSON* pinecone_bulk_upsert(const char *api_key, const char *index_host, cJSON *
     // rewrite with a for loop
     for (int i = 0; i < cJSON_GetArraySize(batches); i++) {
         batch = cJSON_GetArrayItem(batches, i);
-        response_data[i] = (ResponseData) {NULL, 0};
+        response_data[i] = (ResponseData) {"", NULL, NULL, 0};
         batch_handle = get_pinecone_upsert_handle(api_key, index_host, cJSON_Duplicate(batch, true), &response_data[i]); // TODO: figure out why i have to deepcopy // because batch goes out of scope
         curl_multi_add_handle(multi_handle, batch_handle);
     }
@@ -263,7 +264,7 @@ CURL* query_handle;
 CURL* get_pinecone_query_handle(const char *api_key, const char *index_host, const int topK, cJSON *query_vector_values, cJSON *filter, ResponseData* response_data) {
     cJSON *body = cJSON_CreateObject();
     char* body_str;
-    clock_t start, stop, stop2;
+    clock_t start, stop;
     char url[100] = "https://"; strcat(url, index_host); strcat(url, "/query"); // e.g. https://t1-23kshha.svc.apw5-4e34-81fa.pinecone.io/query
     if (query_handle == NULL) {
         elog(NOTICE, "Initializing CURL handle for QUERY");
@@ -287,6 +288,7 @@ CURL* get_pinecone_query_handle(const char *api_key, const char *index_host, con
     // stop2 = clock();
     elog(NOTICE, "Printing body of query to body_str took %f seconds", (double)(stop - start) / CLOCKS_PER_SEC);
     // elog(NOTICE, "Parsing body_str to cJSON took %f seconds", (double)(stop2 - stop) / CLOCKS_PER_SEC);
+    strcpy(response_data->message, "querying index");
     response_data->request_body = body_str;
     set_curl_options(query_handle, api_key, url, "POST", response_data);
     curl_easy_setopt(query_handle, CURLOPT_POSTFIELDS, body_str);
@@ -304,6 +306,7 @@ CURL* get_pinecone_upsert_handle(const char *api_key, const char *index_host, cJ
     body_str = cJSON_Print(body);
     cJSON_Delete(body); // free the cJSON object especially including the vectors
     // save the body_str pointer in response_data so we can free it later in the write_callback
+    strcpy(response_data->message, "upserting vectors");
     response_data->request_body = body_str;
     curl_easy_setopt(hnd, CURLOPT_POSTFIELDS, body_str);
     return hnd;
@@ -327,6 +330,8 @@ CURL* get_pinecone_fetch_handle(const char *api_key, const char *index_host, cJS
     }
     url[strlen(url) - 1] = '\0'; // remove the trailing &
     fetch_handle = curl_easy_init();
+    strcpy(response_data->message, "fetching vectors");
+    response_data->request_body = NULL;
     set_curl_options(fetch_handle, api_key, url, "GET", response_data);
     return fetch_handle;
 }
