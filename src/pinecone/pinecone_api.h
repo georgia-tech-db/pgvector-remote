@@ -9,6 +9,7 @@
 typedef CURL** CURLHandleList;
 
 typedef struct {
+    char *request_body;
     char *data;
     size_t length;
 } ResponseData;

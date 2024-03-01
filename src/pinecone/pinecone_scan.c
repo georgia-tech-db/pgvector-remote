@@ -5,6 +5,7 @@
 #include "catalog/pg_operator_d.h"
 #include "utils/rel.h"
 #include "utils/builtins.h"
+#include <time.h>
 
 PineconeCheckpoint* get_checkpoints_to_fetch(Relation index) {
     // starting at the current pinecone page, create a list of each checkpoint page's checkpoint (blkno, tid, checkpt_no)
@@ -53,11 +54,15 @@ PineconeCheckpoint get_best_fetched_checkpoint(Relation index, PineconeCheckpoin
     PineconeCheckpoint best_checkpoint = {INVALID_CHECKPOINT_NUMBER, InvalidBlockNumber, {{0, 0},0}, 0};
     cJSON* vectors = cJSON_GetObjectItemCaseSensitive(fetch_results, "vectors");
     cJSON* vector;
+    clock_t start, end;
     int n_fetched = cJSON_GetArraySize(vectors);
     ItemPointerData* fetched_tids = palloc(sizeof(ItemPointerData) * n_fetched);
     int k = 0;
 
-    elog(DEBUG1, "fetched vectors: %s", cJSON_Print(vectors));
+    start = clock();
+    cJSON_Print(vectors);
+    end = clock();
+    elog(DEBUG1, "time to print fetched vectors: %f", (double)(end - start) / CLOCKS_PER_SEC);
     cJSON_ArrayForEach(vector, vectors) {
         char* id_str = vector->string;
         fetched_tids[k++] = pinecone_id_get_heap_tid(id_str);

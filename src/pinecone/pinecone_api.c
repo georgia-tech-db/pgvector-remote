@@ -8,6 +8,8 @@
 
 #include <time.h>
 
+#include <stdlib.h>
+
 
 
 size_t write_callback(char *contents, size_t size, size_t nmemb, void *userdata) {
@@ -21,6 +23,12 @@ size_t write_callback(char *contents, size_t size, size_t nmemb, void *userdata)
         memcpy(response_data->data + response_data->length, contents, real_size); // Append new data
         response_data->length += real_size;
         response_data->data[response_data->length] = '\0'; // Null terminate the string
+    }
+
+    if (response_data->request_body != NULL) {
+        // free the request body
+        elog(DEBUG1, "Freeing request body");
+        free(response_data->request_body);
     }
 
     elog(DEBUG1, "Response (write_callback): %s", contents);
@@ -189,10 +197,13 @@ cJSON** pinecone_query_with_fetch(const char *api_key, const char *index_host, c
 
 
     // parse the responses
+    start = clock();
     responses[0] = cJSON_Parse(query_response_data.data);
     if (with_fetch) {
         responses[1] = cJSON_Parse(fetch_response_data.data);
     }
+    stop = clock();
+    elog(NOTICE, "Parsing responses took %f seconds", (double)(stop - start) / CLOCKS_PER_SEC);
 
     return responses;
 }
@@ -204,21 +215,28 @@ cJSON* pinecone_bulk_upsert(const char *api_key, const char *index_host, cJSON *
     CURL* batch_handle;
     ResponseData* response_data = palloc(sizeof(ResponseData) * cJSON_GetArraySize(batches));
     int running;
-    int i = 0;
     if (multi_handle == NULL) {
-        elog(NOTICE, "Initializing CURL multi handle for BULK");
+        elog(NOTICE, "Initializing CURL multi handle for BULK II");
         multi_handle = curl_multi_init();
         if (multi_handle == NULL) {
             elog(ERROR, "Failed to initialize CURL multi handle");
         }
     }
     // todo we need to free the actual data in response_data
-    cJSON_ArrayForEach(batch, batches) {
+    // cJSON_ArrayForEach(batch, batches) {
+        // response_data[i] = (ResponseData) {NULL, 0};
+        // batch_handle = get_pinecone_upsert_handle(api_key, index_host, batch, &response_data[i]); // TODO: figure out why i have to deepcopy // because batch goes out of scope
+        // curl_multi_add_handle(multi_handle, batch_handle);
+        // i++;
+    // }
+    // rewrite with a for loop
+    for (int i = 0; i < cJSON_GetArraySize(batches); i++) {
+        batch = cJSON_GetArrayItem(batches, i);
         response_data[i] = (ResponseData) {NULL, 0};
         batch_handle = get_pinecone_upsert_handle(api_key, index_host, cJSON_Duplicate(batch, true), &response_data[i]); // TODO: figure out why i have to deepcopy // because batch goes out of scope
         curl_multi_add_handle(multi_handle, batch_handle);
-        i++;
     }
+    cJSON_Delete(batches);
 
     // run the handles
     curl_multi_perform(multi_handle, &running);
@@ -244,6 +262,8 @@ cJSON* pinecone_bulk_upsert(const char *api_key, const char *index_host, cJSON *
 CURL* query_handle;
 CURL* get_pinecone_query_handle(const char *api_key, const char *index_host, const int topK, cJSON *query_vector_values, cJSON *filter, ResponseData* response_data) {
     cJSON *body = cJSON_CreateObject();
+    char* body_str;
+    clock_t start, stop, stop2;
     char url[100] = "https://"; strcat(url, index_host); strcat(url, "/query"); // e.g. https://t1-23kshha.svc.apw5-4e34-81fa.pinecone.io/query
     if (query_handle == NULL) {
         elog(NOTICE, "Initializing CURL handle for QUERY");
@@ -259,8 +279,17 @@ CURL* get_pinecone_query_handle(const char *api_key, const char *index_host, con
     cJSON_AddItemToObject(body, "includeMetadata", cJSON_CreateFalse());
     elog(DEBUG1, "Querying index %s with payload: %s", index_host, cJSON_Print(body));
     query_handle = curl_easy_init();
+    start = clock();
+    body_str = cJSON_Print(body);
+    cJSON_Delete(body);
+    stop = clock();
+    // cJSON_Parse(body_str);
+    // stop2 = clock();
+    elog(NOTICE, "Printing body of query to body_str took %f seconds", (double)(stop - start) / CLOCKS_PER_SEC);
+    // elog(NOTICE, "Parsing body_str to cJSON took %f seconds", (double)(stop2 - stop) / CLOCKS_PER_SEC);
+    response_data->request_body = body_str;
     set_curl_options(query_handle, api_key, url, "POST", response_data);
-    curl_easy_setopt(query_handle, CURLOPT_POSTFIELDS, cJSON_Print(body));
+    curl_easy_setopt(query_handle, CURLOPT_POSTFIELDS, body_str);
     return query_handle;
 }
 
@@ -268,11 +297,14 @@ CURL* get_pinecone_upsert_handle(const char *api_key, const char *index_host, cJ
     CURL *hnd = curl_easy_init();
     cJSON *body = cJSON_CreateObject();
     char *body_str;
-    // furthermore, we need to be sure to free the memory allocated for response_data.data (by the writeback)
+    // furthermore, we need to be sure to free the memory allocated for response_data.data (by the writeback) after we are done using it
     char url[100] = "https://"; strcat(url, index_host); strcat(url, "/vectors/upsert"); // https://t1-23kshha.svc.apw5-4e34-81fa.pinecone.io/vectors/upsert
     cJSON_AddItemToObject(body, "vectors", vectors);
     set_curl_options(hnd, api_key, url, "POST", response_data);
     body_str = cJSON_Print(body);
+    cJSON_Delete(body); // free the cJSON object especially including the vectors
+    // save the body_str pointer in response_data so we can free it later in the write_callback
+    response_data->request_body = body_str;
     curl_easy_setopt(hnd, CURLOPT_POSTFIELDS, body_str);
     return hnd;
 }
