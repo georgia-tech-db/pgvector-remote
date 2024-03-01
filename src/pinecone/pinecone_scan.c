@@ -208,7 +208,7 @@ void pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderb
     so->pinecone_results = matches->child;
     if (matches->child == NULL) {
         // todo: hint the user that the buffer might not be flushed
-        ereport(NOTICE, (errcode(ERRCODE_NO_DATA),
+        ereport(DEBUG1, (errcode(ERRCODE_NO_DATA),
                          errmsg("No matches found")));
     }
 

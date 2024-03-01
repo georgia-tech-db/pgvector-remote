@@ -88,7 +88,7 @@ bool AppendBufferTuple(Relation index, Datum *values, bool *isnull, ItemPointer 
     if (!full && !create_checkpoint) {
         PageAddItem(insert_page, (Item) itup, itemsz, InvalidOffsetNumber, false, false);
         // log the number of items on this page MaxOffsetNumber
-        elog(DEBUG1, "No new page! Page has %d items", PageGetMaxOffsetNumber(insert_page));
+        elog(DEBUG1, "No new page! Page has %lu items", (unsigned long)PageGetMaxOffsetNumber(insert_page));
 
         // release insert_page
         GenericXLogFinish(state);

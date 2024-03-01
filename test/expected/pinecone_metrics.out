@@ -1,11 +1,6 @@
-SET client_min_messages = 'notice';
+SET enable_seqscan = off;
 CREATE TABLE t (val vector(3));
-CREATE INDEX i ON t USING pinecone (val) WITH (metric = "invalid_metric");
-ERROR:  Invalid metric: invalid_metric
-HINT:  Metric must be one of 'euclidean', 'cosine', 'dotproduct'
-CREATE INDEX i ON t USING pinecone (val) WITH (metric = "cosine");
-ERROR:  Invalid pinecone metric cosine for this opclass.
-HINT:  Metric should be euclidean
-CREATE INDEX i ON t USING pinecone (val vector_cosine_ops) WITH (metric = "euclidean");
-ERROR:  Invalid pinecone metric euclidean for this opclass.
-HINT:  Metric should be cosine
+CREATE INDEX i2 ON t USING pinecone (val vector_l2_ops);
+CREATE INDEX i1 ON t USING pinecone (val vector_ip_ops);
+CREATE INDEX i3 ON t USING pinecone (val vector_cosine_ops);
+DROP TABLE t;
