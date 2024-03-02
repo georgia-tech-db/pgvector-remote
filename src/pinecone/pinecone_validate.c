@@ -23,8 +23,6 @@ void validate_vector_nonzero(Vector* vector) {
 
 void pinecone_spec_validator(const char *spec)
 {
-    elog(NOTICE, "Validating spec: %s", spec);
-
     bool empty = strcmp(spec, "") == 0;
     if (empty || cJSON_Parse(spec) == NULL)
     {
