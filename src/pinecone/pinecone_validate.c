@@ -4,7 +4,7 @@
 
 
 void validate_api_key(void) {
-    if (pinecone_api_key == NULL) {
+    if (pinecone_api_key == NULL || strlen(pinecone_api_key) == 0) {
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                  errmsg("Pinecone API key not set"),
@@ -23,6 +23,8 @@ void validate_vector_nonzero(Vector* vector) {
 
 void pinecone_spec_validator(const char *spec)
 {
+    elog(NOTICE, "Validating spec: %s", spec);
+
     bool empty = strcmp(spec, "") == 0;
     if (empty || cJSON_Parse(spec) == NULL)
     {

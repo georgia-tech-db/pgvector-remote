@@ -180,7 +180,7 @@ pinecone_delete_unused_indexes(PG_FUNCTION_ARGS) {
 
 // I need a way to go from an index name to an index oid: I can do this by querying the pg_class table
 Oid get_index_oid_from_name(char* index_name) {
-    Oid index_oid;
+    Oid index_oid = 0;
     char query[256];
     int ret;
     sprintf(query, "SELECT oid FROM pg_class WHERE relname = '%s' AND relkind = 'i';", index_name);
