@@ -49,6 +49,8 @@ typedef struct PineconeScanOpaqueData
     TupleTableSlot *slot; // TODO ??
     bool isnull;
     bool more_buffer_tuples;
+    char* bloom_filter;
+    size_t bloom_filter_size;
 
     // support functions
     FmgrInfo *procinfo;
@@ -127,6 +129,10 @@ extern int pinecone_requests_per_batch;
 extern int pinecone_max_buffer_scan;
 extern int pinecone_max_fetched_vectors_for_liveness_check;
 #define PINECONE_BATCH_SIZE pinecone_vectors_per_request * pinecone_requests_per_batch
+// GUC variables for testing
+#ifdef PINECONE_MOCK
+extern char* pinecone_mock_response;
+#endif
 
 // function declarations
 
@@ -173,6 +179,7 @@ void no_endscan(IndexScanDesc scan);
 PineconeCheckpoint* get_checkpoints_to_fetch(Relation index);
 PineconeCheckpoint get_best_fetched_checkpoint(Relation index, PineconeCheckpoint* checkpoints, cJSON* fetch_results);
 cJSON *fetch_ids_from_checkpoints(PineconeCheckpoint *checkpoints);
+#define BUFFER_BLOOM_K 20 // bloom filter k 
 
 
 
@@ -203,6 +210,9 @@ char* checkpoint_to_string(PineconeCheckpoint checkpoint);
 char* buffer_meta_to_string(PineconeBufferMetaPageData buffer_meta);
 char* buffer_opaque_to_string(PineconeBufferOpaqueData buffer_opaque);
 void pinecone_print_relation(Relation index);
+// hashing and bloom filters
+uint64 murmurhash64(uint64 data);
+uint32 hash_tid(ItemPointerData tid, int seed);
 
 // helpers
 Oid get_index_oid_from_name(char* index_name);

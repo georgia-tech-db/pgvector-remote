@@ -199,3 +199,35 @@ void pinecone_print_relation(Relation index) {
     }
 }
 
+
+// murmur hash lifted from hnswutils.c
+uint64
+murmurhash64(uint64 data)
+{
+	uint64		h = data;
+
+	h ^= h >> 33;
+	h *= 0xff51afd7ed558ccd;
+	h ^= h >> 33;
+	h *= 0xc4ceb9fe1a85ec53;
+	h ^= h >> 33;
+
+	return h;
+}
+
+/* TID hash table */
+uint32
+hash_tid(ItemPointerData tid, int seed)
+{
+	union
+	{
+		uint64		i;
+		ItemPointerData tid;
+	}			x;
+
+	/* Initialize unused bytes */
+	x.i = 0;
+	x.tid = tid;
+
+	return murmurhash64(x.i + seed);
+}

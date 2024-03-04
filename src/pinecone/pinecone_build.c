@@ -57,21 +57,24 @@ IndexBuildResult *pinecone_build(Relation heap, Relation index, IndexInfo *index
     int dimensions = TupleDescAttr(index->rd_att, 0)->atttypmod;
     char* pinecone_index_name = get_pinecone_index_name(index);
     char* host = GET_STRING_RELOPTION(opts, host);
+    cJSON* describe_index_response;
 
     validate_api_key();
-
-    // if the host is specified, check that it is empty
-    if (strcmp(host, DEFAULT_HOST) != 0) {
-        cJSON* describe_index_response = pinecone_get_index_stats(pinecone_api_key, host);
-        elog(DEBUG1, "Host specified in reloptions, checking if it is empty. Got response: %s", cJSON_Print(describe_index_response));
-        // todo: check if the index is empty, check that the dimensions and metric match
-        // todo: emit warning when pods fill up
-    }
 
     // if the host is not specified, create a remote index and get the host
     if (strcmp(host, DEFAULT_HOST) == 0) {
         elog(DEBUG1, "Host not specified in reloptions, creating remote index from spec...");
         host = CreatePineconeIndexAndWait(index, spec_json, metric, pinecone_index_name, dimensions);
+    }
+
+
+    // Describe the index.
+    describe_index_response = pinecone_get_index_stats(pinecone_api_key, host);
+    // if the host is specified, check that it is empty
+    if (strcmp(host, DEFAULT_HOST) != 0) {
+        elog(DEBUG1, "Host specified in reloptions, checking if it is empty. Got response: %s", cJSON_Print(describe_index_response));
+        // todo: check if the index is empty, check that the dimensions and metric match
+        // todo: emit warning when pods fill up
     }
 
     // if overwrite is true, delete all vectors in the remote index
