@@ -1,4 +1,5 @@
 #include "pinecone_api.h"
+#include "pinecone.h"
 #include "postgres.h"
 
 #include <stdio.h>
@@ -29,7 +30,7 @@ size_t write_callback(char *contents, size_t size, size_t nmemb, void *userdata)
         // free the request body
         elog(DEBUG1, "Freeing request body");
         free(response_data->request_body);
-        response_data->request_body = NULL; // do that subsequent calls to write_callback don't free the request body again
+        response_data->request_body = NULL; // so that subsequent calls to write_callback don't free the request body again
     }
 
     elog(DEBUG1, "Response (write_callback): %s", contents);
@@ -61,7 +62,13 @@ CURL *hnd_t;
 cJSON* generic_pinecone_request(const char *api_key, const char *url, const char *method, cJSON *body) {
     // CURL *hnd = curl_easy_init();
     ResponseData response_data = {"", NULL, NULL, 0};
-    cJSON *response_json;
+    cJSON *response_json, *error;
+    CURLcode ret;
+
+    #ifdef PINECONE_MOCK
+    elog(NOTICE, "Using mock response");
+    return cJSON_Parse(pinecone_mock_response);
+    #endif
 
     if (hnd_t == NULL) {
         elog(NOTICE, "Initializing CURL handle");
@@ -75,8 +82,21 @@ cJSON* generic_pinecone_request(const char *api_key, const char *url, const char
     if (body != NULL) {
         curl_easy_setopt(hnd_t, CURLOPT_POSTFIELDS, cJSON_Print(body));
     }
-    curl_easy_perform(hnd_t);
+    ret = curl_easy_perform(hnd_t);
+    // TODO: We need check the ret code in the other endpoints as well
+    if (ret != CURLE_OK) {
+        elog(ERROR, "curl_easy_perform() failed: %s", curl_easy_strerror(ret));
+    }
+
     response_json = cJSON_Parse(response_data.data);
+    if (response_json == NULL) {
+        elog(ERROR, "Failed to parse response from Pinecone API. Response: %s", response_data.data);
+    }
+    // report if json has an error field
+    error = cJSON_GetObjectItemCaseSensitive(response_json, "error");
+    if (error != NULL) {
+        elog(ERROR, "Pinecone API returned an error: %s", cJSON_Print(error));
+    }
     return response_json;
 }
 
@@ -223,14 +243,7 @@ cJSON* pinecone_bulk_upsert(const char *api_key, const char *index_host, cJSON *
             elog(ERROR, "Failed to initialize CURL multi handle");
         }
     }
-    // todo we need to free the actual data in response_data
-    // cJSON_ArrayForEach(batch, batches) {
-        // response_data[i] = (ResponseData) {NULL, 0};
-        // batch_handle = get_pinecone_upsert_handle(api_key, index_host, batch, &response_data[i]); // TODO: figure out why i have to deepcopy // because batch goes out of scope
-        // curl_multi_add_handle(multi_handle, batch_handle);
-        // i++;
-    // }
-    // rewrite with a for loop
+
     for (int i = 0; i < cJSON_GetArraySize(batches); i++) {
         batch = cJSON_GetArrayItem(batches, i);
         response_data[i] = (ResponseData) {"", NULL, NULL, 0};
