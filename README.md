@@ -215,11 +215,11 @@ SELECT category_id, AVG(embedding) FROM items GROUP BY category_id;
 
 ### Query Options
 
-pinecone.top_k: Get the top K relevant results from pinecone
-pinecone.vectors_per_request: Number of vectors per request
-pinecone.requests_per_batch: Number of requests to be sent in one batch
-The buffer size is calculated as pinecone.vectors_per_request * pinecone.requests_per_batch
-pinecone.max_buffer_scan: Pinecone max buffer search
+pinecone.top_k: Get the top K relevant results from pinecone.  
+pinecone.vectors_per_request: Number of vectors per request.  
+pinecone.requests_per_batch: Number of requests to be sent in one batch.  
+The buffer size is calculated as pinecone.vectors_per_request * pinecone.requests_per_batch  
+pinecone.max_buffer_scan: Pinecone max buffer search  
 
 ## Reference
 
@@ -306,13 +306,13 @@ Get the [Docker image] with:
 docker pull kslohith17/pgvector-remote:latest
 ```
 
-This Contains a postgresql along with pgvector-remote configured to run on it.
+This contains postgres along with pgvector-remote configured to run on it.
 
 ## Thanks
 
 Thanks to:
 
-- [pgvector: Open-source vector similarity search for Postgres] (https://github.com/pgvector/pgvector)
+- [pgvector: Open-source vector similarity search for Postgres](https://github.com/pgvector/pgvector)
 - [PASE: PostgreSQL Ultra-High-Dimensional Approximate Nearest Neighbor Search Extension](https://dl.acm.org/doi/pdf/10.1145/3318464.3386131)
 - [Faiss: A Library for Efficient Similarity Search and Clustering of Dense Vectors](https://github.com/facebookresearch/faiss)
 - [Using the Triangle Inequality to Accelerate k-means](https://cdn.aaai.org/ICML/2003/ICML03-022.pdf)
