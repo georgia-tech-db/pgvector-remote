@@ -213,7 +213,9 @@ pinecone_print_index(PG_FUNCTION_ARGS) {
     index_oid = get_index_oid_from_name(index_name);
     elog(NOTICE, "Index oid: %u", index_oid);
     index = index_open(index_oid, AccessShareLock);
-    elog(NOTICE, "Index: %d", index->rd_index->indrelid);
+    #if PG_VERSION_NUM >= 150000
+        elog(NOTICE, "Index: %d", index->rd_index->indrelid);
+    #endif
     pinecone_print_relation(index);
     index_close(index, AccessShareLock);
     PG_RETURN_VOID();
