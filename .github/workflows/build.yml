@@ -1,5 +1,14 @@
 name: build
-on: [push, pull_request]
+on: 
+  push:
+    branches:
+      - main
+      - feature/**
+  pull_request:
+    branches:
+      - main
+      - feature/**
+
 jobs:
   ubuntu:
     runs-on: ${{ matrix.os }}
@@ -22,6 +31,7 @@ jobs:
             os: ubuntu-20.04
     steps:
       - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
       - uses: ankane/setup-postgres@v1
         with:
           postgres-version: ${{ matrix.postgres }}
@@ -40,6 +50,7 @@ jobs:
     if: ${{ !startsWith(github.ref_name, 'windows') }}
     steps:
       - uses: actions/checkout@v4
+      - run: brew install curl
       - uses: ankane/setup-postgres@v1
         with:
           postgres-version: 15
@@ -92,7 +103,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
       - uses: ankane/setup-postgres-valgrind@v1
+        with:
+          postgres-version: 16
       - run: make
       - run: sudo --preserve-env=PG_CONFIG make install
       - run: make installcheck
+
