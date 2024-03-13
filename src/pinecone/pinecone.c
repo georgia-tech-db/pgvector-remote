@@ -14,19 +14,34 @@ int pinecone_vectors_per_request = 100;
 int pinecone_requests_per_batch = 40;
 int pinecone_max_buffer_scan = 10000; // maximum number of tuples to search in the buffer
 int pinecone_max_fetched_vectors_for_liveness_check = 10;
+#ifdef PINECONE_MOCK
+char* pinecone_mock_response = NULL;
+#endif
 
 // todo: principled batch sizes. Do we ever want the buffer to be bigger than a multi-insert? Possibly if we want to let the buffer fill up when the remote index is down.
 static relopt_kind pinecone_relopt_kind;
 
+
 void PineconeInit(void)
 {
     pinecone_relopt_kind = add_reloption_kind();
-    // N.B. The default values are validated when the extension is created, so we have to provide a valid default
+    // N.B. The default values are validated when the extension is created, so we have to provide a valid json default
     add_string_reloption(pinecone_relopt_kind, "spec",
                             "Specification of the Pinecone Index. Refer to https://docs.pinecone.io/reference/create_index",
-                            "{\"serverless\":{\"cloud\":\"aws\",\"region\":\"us-west-2\"}}",
-                            &pinecone_spec_validator, 
+                            DEFAULT_SPEC,
+                            NULL,
                             AccessExclusiveLock);
+    add_string_reloption(pinecone_relopt_kind, "host",
+                            "Host of the Pinecone Index. Cannot be used with spec",
+                            DEFAULT_HOST,
+                            NULL,
+                            AccessExclusiveLock);
+    add_bool_reloption(pinecone_relopt_kind, "overwrite",
+                            "Delete all vectors in existing index. Host must be specified",
+                            false, AccessExclusiveLock);
+    add_bool_reloption(pinecone_relopt_kind, "skip_build",
+                            "Do not upload vectors from the base table.",
+                            false, AccessExclusiveLock);
     // todo: allow for specifying a hostname instead of asking to create it
     // todo: you can have a relopts_validator which validates the whole relopt set. This could be used to check that exactly one of spec or host is set
     DefineCustomStringVariable("pinecone.api_key", "Pinecone API key", "Pinecone API key",
@@ -50,14 +65,20 @@ void PineconeInit(void)
                             0, NULL, NULL, NULL);
     DefineCustomIntVariable("pinecone.max_buffer_scan", "Pinecone max buffer search", "Pinecone max buffer search",
                             &pinecone_max_buffer_scan,
-                            10000, 1, 100000,
+                            10000, 0, 100000,
                             PGC_USERSET,
                             0, NULL, NULL, NULL);
     DefineCustomIntVariable("pinecone.max_fetched_vectors_for_liveness_check", "Pinecone max fetched vectors for liveness check", "Pinecone max fetched vectors for liveness check",
                             &pinecone_max_fetched_vectors_for_liveness_check,
-                            10, 1, 100, // more than 100 is useless and won't fit in the 2048 chars allotted for the URL
+                            10, 0, 100, // more than 100 is useless and won't fit in the 2048 chars allotted for the URL
                             PGC_USERSET,
                             0, NULL, NULL, NULL);
+    #ifdef PINECONE_MOCK
+    DefineCustomStringVariable("pinecone.mock_response", "Pinecone mock response", "Pinecone mock response",
+                              &pinecone_mock_response, "", 
+                              PGC_USERSET, 
+                              0, NULL, NULL, NULL); 
+    #endif
     MarkGUCPrefixReserved("pinecone");
 }
 
@@ -76,14 +97,35 @@ void no_costestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 
 bytea * pinecone_options(Datum reloptions, bool validate)
 {
-    PineconeOptions *opts;
 	static const relopt_parse_elt tab[] = {
 		{"spec", RELOPT_TYPE_STRING, offsetof(PineconeOptions, spec)},
+        {"host", RELOPT_TYPE_STRING, offsetof(PineconeOptions, host)},
+        {"overwrite", RELOPT_TYPE_BOOL, offsetof(PineconeOptions, overwrite)},
+        {"skip_build", RELOPT_TYPE_BOOL, offsetof(PineconeOptions, skip_build)}
+
 	};
-    opts = (PineconeOptions *) build_reloptions(reloptions, validate,
+    static bool first_time = true;
+    bool spec_set, host_set, exactly_one;
+    PineconeOptions* opts = (PineconeOptions *) build_reloptions(reloptions, validate,
                                       pinecone_relopt_kind,
                                       sizeof(PineconeOptions),
                                       tab, lengthof(tab));
+    // if this is the first call, we don't want to validate the default values
+    if (first_time) {
+        first_time = false;
+        return (bytea *) opts;
+        // todo: this is ugly but otherwise pg tries to validate the default values
+    }
+
+    // check that exactly one of spec or host is set
+    spec_set = (opts->spec != 0) && (strcmp((char*) opts + opts->spec, DEFAULT_SPEC) != 0);
+    host_set = (opts->host != 0) && (strcmp((char*) opts + opts->host, DEFAULT_HOST) != 0);
+    exactly_one = spec_set ^ host_set;
+    if (!exactly_one) {
+        ereport(NOTICE,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                errmsg("Exactly one of spec or host must be set, but host is %s and spec is %s", GET_STRING_RELOPTION(opts, host), GET_STRING_RELOPTION(opts, spec))));
+    }
 	return (bytea *) opts;
 }
 

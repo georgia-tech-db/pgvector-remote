@@ -9,6 +9,8 @@
 typedef CURL** CURLHandleList;
 
 typedef struct {
+    char message[256];
+    char *request_body;
     char *data;
     size_t length;
 } ResponseData;
@@ -18,9 +20,11 @@ struct curl_slist *create_common_headers(const char *api_key);
 void set_curl_options(CURL *hnd, const char *api_key, const char *url, const char *method, ResponseData *response_data);
 cJSON* generic_pinecone_request(const char *api_key, const char *url, const char *method, cJSON *body);
 cJSON* describe_index(const char *api_key, const char *index_name);
+cJSON* pinecone_get_index_stats(const char *api_key, const char *index_host);
 cJSON* list_indexes(const char *api_key);
 cJSON* pinecone_delete_vectors(const char *api_key, const char *index_host, cJSON *ids);
 cJSON* pinecone_delete_index(const char *api_key, const char *index_name);
+cJSON* pinecone_delete_all(const char *api_key, const char *index_host);
 cJSON* pinecone_list_vectors(const char *api_key, const char *index_host, int limit, char* pagination_token);
 cJSON* pinecone_create_index(const char *api_key, const char *index_name, const int dimension, const char *metric, cJSON *spec);
 cJSON** pinecone_query_with_fetch(const char *api_key, const char *index_host, const int topK, cJSON *query_vector_values, cJSON *filter, bool with_fetch, cJSON* fetch_ids);

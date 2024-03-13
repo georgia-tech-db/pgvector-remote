@@ -5,6 +5,9 @@
 #include "catalog/pg_operator_d.h"
 #include "utils/rel.h"
 #include "utils/builtins.h"
+#include <time.h>
+#include "common/hashfn.h"
+
 
 PineconeCheckpoint* get_checkpoints_to_fetch(Relation index) {
     // starting at the current pinecone page, create a list of each checkpoint page's checkpoint (blkno, tid, checkpt_no)
@@ -53,11 +56,15 @@ PineconeCheckpoint get_best_fetched_checkpoint(Relation index, PineconeCheckpoin
     PineconeCheckpoint best_checkpoint = {INVALID_CHECKPOINT_NUMBER, InvalidBlockNumber, {{0, 0},0}, 0};
     cJSON* vectors = cJSON_GetObjectItemCaseSensitive(fetch_results, "vectors");
     cJSON* vector;
+    clock_t start, end;
     int n_fetched = cJSON_GetArraySize(vectors);
     ItemPointerData* fetched_tids = palloc(sizeof(ItemPointerData) * n_fetched);
     int k = 0;
 
-    elog(DEBUG1, "fetched vectors: %s", cJSON_Print(vectors));
+    start = clock();
+    cJSON_Print(vectors);
+    end = clock();
+    elog(DEBUG1, "time to print fetched vectors: %f", (double)(end - start) / CLOCKS_PER_SEC);
     cJSON_ArrayForEach(vector, vectors) {
         char* id_str = vector->string;
         fetched_tids[k++] = pinecone_id_get_heap_tid(id_str);
@@ -219,6 +226,9 @@ void pinecone_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderb
 
     // locally scan the buffer and add them to the sort state
     load_buffer_into_sort(scan->indexRelation, so, query_datum, tupdesc);
+    
+    // allocate for xs_orderbyvals (*Datum)
+    scan->xs_orderbyvals = palloc(sizeof(Datum)); // assumes only one ORDER BY
 
 }
 
@@ -234,6 +244,7 @@ void load_buffer_into_sort(Relation index, PineconeScanOpaque so, Datum query_da
     int n_tuples = buffer_meta.latest_checkpoint.n_preceding_tuples + buffer_meta.n_tuples_since_last_checkpoint;
     int unflushed_tuples = n_tuples - buffer_meta.flush_checkpoint.n_preceding_tuples;
     int unready_tuples = n_tuples - buffer_meta.ready_checkpoint.n_preceding_tuples;
+    size_t bloom_filter_size = (((int) (1.44 * BUFFER_BLOOM_K * unready_tuples))>>3) + 1; // bloom filter size in bytes, 1.44 is the optimal bloom filter expansion factor
 
     // check H - T > max_local_scan
     if (unready_tuples > pinecone_max_buffer_scan) {
@@ -241,6 +252,11 @@ void load_buffer_into_sort(Relation index, PineconeScanOpaque so, Datum query_da
                          errmsg("Buffer is too large"),
                          errhint("There are %d tuples in the buffer that have not yet been flushed to pinecone and %d tuples in pinecone that are not yet live. You may want to consider flushing the buffer.", unflushed_tuples, unready_tuples - unflushed_tuples)));
     }
+
+    // initialize the bloom filter
+    // so->bloom_filter = bloom_create(BUFFER_BLOOM_K, buffer_meta.n_tuples_since_last_checkpoint);
+    so->bloom_filter = palloc0(bloom_filter_size);
+    so->bloom_filter_size = bloom_filter_size;
 
 
     // add tuples to the sortstate
@@ -264,6 +280,12 @@ void load_buffer_into_sort(Relation index, PineconeScanOpaque so, Datum query_da
             itup = (IndexTuple) PageGetItem(page, itemid);
             datum = index_getattr(itup, 1, index_tupdesc, &isnull);
             if (isnull) elog(ERROR, "vector is null");
+            
+            // add the tuple to the bloom filter
+            for (int i = 0; i < BUFFER_BLOOM_K; i++) {
+                uint32 hash = hash_tid(itup->t_tid, i); // i is the seed
+                so->bloom_filter[(hash >> 3) % so->bloom_filter_size] |= (1 << (hash & 7));
+            }
 
             // add the tuples
             ExecClearTuple(slot);
@@ -304,9 +326,30 @@ bool pinecone_gettuple(IndexScanDesc scan, ScanDirection dir)
 	ItemPointerData match_heaptid;
     PineconeScanOpaque so = (PineconeScanOpaque) scan->opaque;
     cJSON *match = so->pinecone_results;
-    double pinecone_best_dist;
-    double buffer_best_dist;
+    double pinecone_best_dist, buffer_best_dist, dist, dist_lower_bound;
     bool isnull;
+    float rel_tol = 0.05; // relative tolerance for distance recheck; TODO: this should depend on the metric
+
+    // while the match is in the bloom filter, get the next match
+    while (match != NULL) {
+        bool duplicate = true;
+        id_str = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(match, "id"));
+        match_heaptid = pinecone_id_get_heap_tid(id_str);
+        for (int i = 0; i < BUFFER_BLOOM_K; i++) {
+            uint32 hash = hash_tid(match_heaptid, i); // i is the seed
+            if (!(so->bloom_filter[(hash >> 3) % so->bloom_filter_size] & (1 << (hash & 7)))) {
+                duplicate = false;
+                break;
+            }
+        }
+        if (duplicate) {
+            elog(DEBUG1, "skipping duplicate match %s. this was returned by pinecone, but was also found in the local buffer", id_str);
+            match = match->next;
+            so->pinecone_results = match;
+        } else {
+            break;
+        }
+    }
 
     // use a case statement to determine the best distance
     if (match == NULL) {
@@ -341,8 +384,8 @@ bool pinecone_gettuple(IndexScanDesc scan, ScanDirection dir)
     }
     else if (buffer_best_dist < pinecone_best_dist) {
         // use the buffer tuple
-        Datum datum;
-        datum = slot_getattr(so->slot, 2, &isnull);
+        Datum datum = slot_getattr(so->slot, 2, &isnull);
+        dist = buffer_best_dist;
         match_heaptid = *((ItemPointer) DatumGetPointer(datum));
         scan->xs_heaptid = match_heaptid;
         scan->xs_recheck = true;
@@ -350,14 +393,19 @@ bool pinecone_gettuple(IndexScanDesc scan, ScanDirection dir)
         so->more_buffer_tuples = tuplesort_gettupleslot(so->sortstate, true, false, so->slot, NULL);
     }
     else {
+        dist = pinecone_best_dist;
         // get the id of the match // interpret the id as a string
         id_str = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(match, "id"));
         match_heaptid = pinecone_id_get_heap_tid(id_str);
         scan->xs_heaptid = match_heaptid;
+        // TODO: create a datum out of the distance and retrun it to xs_orderbyvals
         // NEXT
         so->pinecone_results = so->pinecone_results->next;
     }
-    scan->xs_recheckorderby = false;
+    dist_lower_bound = dist > 0 ? dist * (1 - rel_tol) : dist * (1 + rel_tol);
+    scan->xs_recheckorderby = true; // pinecone returns an approximate distance which we need to recheck.
+    scan->xs_orderbyvals[0] = Float8GetDatum((float8) dist_lower_bound);
+    scan->xs_orderbyvals[1] = Float8GetDatum((float8) dist_lower_bound); // this should segfault since we don't have a second ORDER BY
     return true;
 }
 
