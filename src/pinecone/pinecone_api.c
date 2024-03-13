@@ -66,10 +66,15 @@ cJSON* generic_pinecone_request(const char *api_key, const char *url, const char
     CURLcode ret;
 
     #ifdef PINECONE_MOCK
-    elog(NOTICE, "Using mock response");
-    return cJSON_Parse(pinecone_mock_response);
+    if (strcmp(pinecone_mock_response, "") != 0) {
+        elog(NOTICE, "Using mock response");
+        response_json = cJSON_Parse(pinecone_mock_response);
+        pinecone_mock_response = ""; // reset the mock response
+        return response_json;
+    }
     #endif
 
+    // Initialize the CURL handle if it hasn't been initialized yet
     if (hnd_t == NULL) {
         elog(NOTICE, "Initializing CURL handle");
         hnd_t = curl_easy_init();
@@ -78,17 +83,23 @@ cJSON* generic_pinecone_request(const char *api_key, const char *url, const char
         }
     }
 
+    // make the network request
     set_curl_options(hnd_t, api_key, url, method, &response_data);
     if (body != NULL) {
         curl_easy_setopt(hnd_t, CURLOPT_POSTFIELDS, cJSON_Print(body));
     }
     ret = curl_easy_perform(hnd_t);
+
+    // cleanup
+    curl_easy_cleanup(hnd_t);
+
     // TODO: We need check the ret code in the other endpoints as well
     if (ret != CURLE_OK) {
         elog(ERROR, "curl_easy_perform() failed: %s", curl_easy_strerror(ret));
     }
 
     response_json = cJSON_Parse(response_data.data);
+
     if (response_json == NULL) {
         elog(ERROR, "Failed to parse response from Pinecone API. Response: %s", response_data.data);
     }
