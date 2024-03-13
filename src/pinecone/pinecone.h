@@ -121,6 +121,13 @@ typedef struct PineconeBufferOpaqueData
 typedef PineconeBufferOpaqueData *PineconeBufferOpaque;
 
 
+typedef struct PineconeBufferTuple
+{
+    ItemPointerData tid;
+    int16 flags;
+} PineconeBufferTuple;
+#define PINECONE_BUFFER_TUPLE_VACUUMED 1 << 0
+
 // GUC variables
 extern char* pinecone_api_key;
 extern int pinecone_top_k;
@@ -199,6 +206,7 @@ bool no_validate(Oid opclassoid);
 // converting between postgres tuples and json vectors
 cJSON* tuple_get_pinecone_vector(TupleDesc tup_desc, Datum *values, bool *isnull, char *vector_id);
 cJSON* index_tuple_get_pinecone_vector(Relation index, IndexTuple itup);
+cJSON* heap_tuple_get_pinecone_vector(Relation heap, HeapTuple htup);
 char* pinecone_id_from_heap_tid(ItemPointerData heap_tid);
 ItemPointerData pinecone_id_get_heap_tid(char *id);
 // read and write meta pages

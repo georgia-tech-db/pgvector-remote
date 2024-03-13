@@ -32,7 +32,7 @@ void PineconePageInit(Page page, Size pageSize)
  */
 bool AppendBufferTuple(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heapRel)
 {
-    IndexTuple itup;
+    // IndexTuple itup;
     GenericXLogState *state;
     Buffer buffer_meta_buf, insert_buf, newbuf = InvalidBuffer;
     Page buffer_meta_page, insert_page, newpage;
@@ -46,9 +46,14 @@ bool AppendBufferTuple(Relation index, Datum *values, bool *isnull, ItemPointer 
     bool create_checkpoint = false;
     
     // prepare the index tuple
-    itup = index_form_tuple(RelationGetDescr(index), values, isnull);
-    itup->t_tid = *heap_tid;
-    itemsz = MAXALIGN(IndexTupleSize(itup));
+    // itup = index_form_tuple(RelationGetDescr(index), values, isnull);
+    // itup->t_tid = *heap_tid;
+    // itemsz = MAXALIGN(IndexTupleSize(itup));
+    
+    //
+    PineconeBufferTuple buffer_tid;
+    buffer_tid.tid = *heap_tid;
+    itemsz = MAXALIGN(sizeof(PineconeBufferTuple));
 
     /* LOCKING STRATEGY FOR INSERTION
      * acquire append lock
@@ -88,7 +93,9 @@ bool AppendBufferTuple(Relation index, Datum *values, bool *isnull, ItemPointer 
 
     // add item to insert page
     if (!full && !create_checkpoint) {
-        PageAddItem(insert_page, (Item) itup, itemsz, InvalidOffsetNumber, false, false);
+        // PageAddItem(insert_page, (Item) itup, itemsz, InvalidOffsetNumber, false, false);
+        PageAddItem(insert_page, (Item) &buffer_tid, itemsz, InvalidOffsetNumber, false, false);
+
         // log the number of items on this page MaxOffsetNumber
         elog(DEBUG1, "No new page! Page has %lu items", (unsigned long)PageGetMaxOffsetNumber(insert_page));
 
@@ -110,7 +117,8 @@ bool AppendBufferTuple(Relation index, Datum *values, bool *isnull, ItemPointer 
         // check that there is room on the new page
         if (PageGetFreeSpace(newpage) < itemsz) elog(ERROR, "A new page was created, but it doesn't have enough space for the new tuple");
         // add item to new page
-        PageAddItem(newpage, (Item) itup, itemsz, InvalidOffsetNumber, false, false);
+        // PageAddItem(newpage, (Item) itup, itemsz, InvalidOffsetNumber, false, false);
+        PageAddItem(newpage, (Item) &buffer_tid, itemsz, InvalidOffsetNumber, false, false);
         // update insert_page nextblkno
         newblkno = BufferGetBlockNumber(newbuf);
         PineconePageGetOpaque(insert_page)->nextblkno = newblkno;
@@ -123,7 +131,7 @@ bool AppendBufferTuple(Relation index, Datum *values, bool *isnull, ItemPointer 
             new_opaque = PineconePageGetOpaque(newpage);
             new_opaque->prev_checkpoint_blkno = buffer_meta->latest_checkpoint.blkno;
             new_opaque->checkpoint = buffer_meta->latest_checkpoint;
-            new_opaque->checkpoint.tid = itup->t_tid; // we will assume we have inserted up to this checkpoint if we see this tid in pinecone
+            new_opaque->checkpoint.tid = *heap_tid; // we will assume we have inserted up to this point if we see this in pinecone
             new_opaque->checkpoint.blkno = newblkno;
             new_opaque->checkpoint.checkpoint_no += 1;
             new_opaque->checkpoint.n_preceding_tuples += buffer_meta->n_tuples_since_last_checkpoint;
@@ -226,15 +234,15 @@ void FlushToPinecone(Relation index)
     // iterate through the pages
     while (true)
     {
-        IndexTuple itup = NULL;
+        // IndexTuple itup = NULL;
 
         // Add all tuples on the page.
         for (int i = 1; i <= PageGetMaxOffsetNumber(page); i++)
         {
             cJSON* json_vector;
-            itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, i));
+            PineconeBufferTuple buffer_tup = *((PineconeBufferTuple*) PageGetItem(page, PageGetItemId(page, i)));
             // log the tid of the index tuple
-            elog(DEBUG1, "Flushing tuple with tid %d:%d", ItemPointerGetBlockNumber(&itup->t_tid), ItemPointerGetOffsetNumber(&itup->t_tid));
+            elog(DEBUG1, "Flushing tuple with tid %d:%d", ItemPointerGetBlockNumber(&buffer_tup.tid), ItemPointerGetOffsetNumber(&buffer_tup.tid));
 
             // extern bool heap_fetch(Relation relation, Snapshot snapshot,
             //  HeapTuple tuple, Buffer *userbuf, bool keep_buf);
@@ -250,7 +258,8 @@ void FlushToPinecone(Relation index)
                 HeapTupleData heapTupData;
                 Buffer heapBuf = InvalidBuffer;
                 bool found;
-                ItemPointerSet(&(heapTupData.t_self), ItemPointerGetBlockNumber(&itup->t_tid), ItemPointerGetOffsetNumber(&itup->t_tid));
+                // ItemPointerSet(&(heapTupData.t_self), ItemPointerGetBlockNumber(&itup->t_tid), ItemPointerGetOffsetNumber(&itup->t_tid));
+                heapTupData.t_self = buffer_tup.tid;
                 found = heap_fetch(baseTableRel, snapshot, &heapTupData, &heapBuf, false);
 
                 if (!found) {
@@ -268,16 +277,23 @@ void FlushToPinecone(Relation index)
                         }
                     }
                     elog(NOTICE, "That tuple had n attributes where n = %d", baseTableRel->rd_att->natts);
+                    json_vector = heap_tuple_get_pinecone_vector(baseTableRel, &heapTupData);
+                    elog(NOTICE, "Got the json vector: %s", cJSON_Print(json_vector));
+                    cJSON_AddItemToArray(json_vectors, json_vector);
                 }
 
-                // close the base table
+                // release the buffer
+                if (BufferIsValid(heapBuf)) {
+                    ReleaseBuffer(heapBuf);
+                }
+                // todo: not quite so hideous
                 RelationClose(baseTableRel);
-
             }
+            // close the base table
 
 
-            json_vector = index_tuple_get_pinecone_vector(index, itup);
-            cJSON_AddItemToArray(json_vectors, json_vector);
+            // json_vector = index_tuple_get_pinecone_vector(index, itup);
+            // cJSON_AddItemToArray(json_vectors, json_vector);
         }
 
         // Move to the next page. Stop if there are no more pages.
