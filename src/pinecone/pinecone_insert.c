@@ -6,6 +6,8 @@
 #include "storage/lmgr.h"
 #include "miscadmin.h" // MyDatabaseId
 
+#include <access/heapam.h>
+
 #define PINECONE_FLUSH_LOCK_IDENTIFIER 1969841813 // random number, uniquely identifies the pinecone insertion lock
 #define PINECONE_APPEND_LOCK_IDENTIFIER 1969841814 // random number, uniquely identifies the pinecone append lock
 
@@ -231,6 +233,49 @@ void FlushToPinecone(Relation index)
         {
             cJSON* json_vector;
             itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, i));
+            // log the tid of the index tuple
+            elog(DEBUG1, "Flushing tuple with tid %d:%d", ItemPointerGetBlockNumber(&itup->t_tid), ItemPointerGetOffsetNumber(&itup->t_tid));
+
+            // extern bool heap_fetch(Relation relation, Snapshot snapshot,
+            //  HeapTuple tuple, Buffer *userbuf, bool keep_buf);
+            // get a snapshot, fetch the tuple from the heap and print the datums
+            {
+                // get the base table
+                Oid baseTableOid = index->rd_index->indrelid;
+                Relation baseTableRel = RelationIdGetRelation(baseTableOid);
+
+
+                // 
+                Snapshot snapshot = GetActiveSnapshot();
+                HeapTupleData heapTupData;
+                Buffer heapBuf = InvalidBuffer;
+                bool found;
+                ItemPointerSet(&(heapTupData.t_self), ItemPointerGetBlockNumber(&itup->t_tid), ItemPointerGetOffsetNumber(&itup->t_tid));
+                found = heap_fetch(baseTableRel, snapshot, &heapTupData, &heapBuf, false);
+
+                if (!found) {
+                    ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                                    errmsg("Pinecone buffer page not found")));
+                } else {
+                    elog(NOTICE, "Fetched tuple from heap");
+                    for (int k = 0; k < baseTableRel->rd_att->natts; k++) {
+                        bool isnull;
+                        FormData_pg_attribute attr = baseTableRel->rd_att->attrs[k];
+                        Datum datum = heap_getattr(&heapTupData, k + 1, baseTableRel->rd_att, &isnull);
+                        if (!isnull) {
+                            int datum_str = DatumGetInt32(datum);
+                            elog(NOTICE, "Attribute %s: %d", NameStr(attr.attname), datum_str);
+                        }
+                    }
+                    elog(NOTICE, "That tuple had n attributes where n = %d", baseTableRel->rd_att->natts);
+                }
+
+                // close the base table
+                RelationClose(baseTableRel);
+
+            }
+
+
             json_vector = index_tuple_get_pinecone_vector(index, itup);
             cJSON_AddItemToArray(json_vectors, json_vector);
         }
