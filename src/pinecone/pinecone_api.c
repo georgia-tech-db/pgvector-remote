@@ -91,7 +91,7 @@ cJSON* generic_pinecone_request(const char *api_key, const char *url, const char
     ret = curl_easy_perform(hnd_t);
 
     // cleanup
-    curl_easy_cleanup(hnd_t);
+    curl_easy_reset(hnd_t);
 
     // TODO: We need check the ret code in the other endpoints as well
     if (ret != CURLE_OK) {
