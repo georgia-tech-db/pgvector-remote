@@ -14,7 +14,7 @@ TESTS = $(wildcard test/sql/*.sql)
 REGRESS = $(patsubst test/sql/%.sql,%,$(TESTS))
 REGRESS_OPTS = --inputdir=test --load-extension=$(EXTENSION)
 
-OPTFLAGS = -march=native -O0 -fno-strict-aliasing -DPINECONE_MOCK
+OPTFLAGS = -march=native -O0 -fno-strict-aliasing -DPINECONE_MOCK -g
 
 # Mac ARM doesn't support -march=native
 ifeq ($(shell uname -s), Darwin)

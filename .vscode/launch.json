@@ -9,7 +9,7 @@
             "program": "/usr/local/pgsql/bin/postgres",
             "processId": "${command:pickProcess}",
             "MIMode": "gdb",
-            "miDebuggerPath": "/home/ubuntu/pgvector-remote/easy 26018"
+            "miDebuggerPath": "/usr/bin/gdb"
         }
     ]
 }
