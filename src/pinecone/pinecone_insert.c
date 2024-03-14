@@ -5,8 +5,10 @@
 #include "utils/memutils.h"
 #include "storage/lmgr.h"
 #include "miscadmin.h" // MyDatabaseId
+#include <catalog/index.h>
 
 #include <access/heapam.h>
+#include <access/tableam.h>
 
 #define PINECONE_FLUSH_LOCK_IDENTIFIER 1969841813 // random number, uniquely identifies the pinecone insertion lock
 #define PINECONE_APPEND_LOCK_IDENTIFIER 1969841814 // random number, uniquely identifies the pinecone append lock
@@ -206,6 +208,11 @@ void FlushToPinecone(Relation index)
     cJSON* json_vectors = cJSON_CreateArray();
     bool success;
 
+    // index info
+    IndexInfo *indexInfo = BuildIndexInfo(index);
+    Datum* index_values = (Datum*) palloc(sizeof(Datum) * indexInfo->ii_NumIndexAttrs);
+    bool* index_isnull = (bool*) palloc(sizeof(bool) * indexInfo->ii_NumIndexAttrs);
+
     // take a snapshot of the buffer meta
     // we don't need to worry about another transaction advancing the pinecone tail because we have the pinecone insertion lock
     PineconeStaticMetaPageData static_meta = PineconeSnapshotStaticMeta(index);
@@ -221,6 +228,7 @@ void FlushToPinecone(Relation index)
                         errhint("The pinecone insertion lock is currently held by another transaction. This is likely because the buffer is being advanced by another transaction. This is not an error, but it may cause a delay in the insertion of new vectors.")));
         return;
     }
+
 
     // get the first page
     buf = ReadBuffer(index, buffer_meta.flush_checkpoint.blkno);
@@ -251,46 +259,50 @@ void FlushToPinecone(Relation index)
                 // get the base table
                 Oid baseTableOid = index->rd_index->indrelid;
                 Relation baseTableRel = RelationIdGetRelation(baseTableOid);
-
-
-                // 
                 Snapshot snapshot = GetActiveSnapshot();
-                HeapTupleData heapTupData;
-                Buffer heapBuf = InvalidBuffer;
-                bool found;
-                // ItemPointerSet(&(heapTupData.t_self), ItemPointerGetBlockNumber(&itup->t_tid), ItemPointerGetOffsetNumber(&itup->t_tid));
-                heapTupData.t_self = buffer_tup.tid;
-                found = heap_fetch(baseTableRel, snapshot, &heapTupData, &heapBuf, false);
+                char* vector_id; // todo: free
 
+                // get the tuple
+                IndexFetchTableData *fetchData = baseTableRel->rd_tableam->index_fetch_begin(baseTableRel);
+                TupleTableSlot *slot = MakeSingleTupleTableSlot(baseTableRel->rd_att, &TTSOpsBufferHeapTuple);
+                bool call_again, all_dead, found;
+                found = baseTableRel->rd_tableam->index_fetch_tuple(fetchData, &buffer_tup.tid, snapshot, slot, &call_again, &all_dead);
+
+                // print the tuple
                 if (!found) {
                     ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
-                                    errmsg("Pinecone buffer page not found")));
+                                    errmsg("Tuple not found in heap")));
                 } else {
+                    // todo: cut this else block
                     elog(NOTICE, "Fetched tuple from heap");
                     for (int k = 0; k < baseTableRel->rd_att->natts; k++) {
                         bool isnull;
                         FormData_pg_attribute attr = baseTableRel->rd_att->attrs[k];
-                        Datum datum = heap_getattr(&heapTupData, k + 1, baseTableRel->rd_att, &isnull);
+                        Datum datum = slot_getattr(slot, k + 1, &isnull);
                         if (!isnull) {
                             int datum_str = DatumGetInt32(datum);
                             elog(NOTICE, "Attribute %s: %d", NameStr(attr.attname), datum_str);
                         }
                     }
                     elog(NOTICE, "That tuple had n attributes where n = %d", baseTableRel->rd_att->natts);
-                    json_vector = heap_tuple_get_pinecone_vector(baseTableRel, &heapTupData);
-                    elog(NOTICE, "Got the json vector: %s", cJSON_Print(json_vector));
-                    cJSON_AddItemToArray(json_vectors, json_vector);
                 }
 
-                // release the buffer
-                if (BufferIsValid(heapBuf)) {
-                    ReleaseBuffer(heapBuf);
-                }
-                // todo: not quite so hideous
+                // extract the indexed columns
+                FormIndexDatum(indexInfo, slot, NULL, index_values, index_isnull);
+
+                vector_id = pinecone_id_from_heap_tid(buffer_tup.tid);
+                json_vector = tuple_get_pinecone_vector(index->rd_att, index_values, index_isnull, vector_id);
+                elog(NOTICE, "Got the json vector: %s", cJSON_Print(json_vector));
+                cJSON_AddItemToArray(json_vectors, json_vector);
+
+                // todo: do this outside of the loop
+                // close the slot and the fetch data
+                ExecDropSingleTupleTableSlot(slot);
+                baseTableRel->rd_tableam->index_fetch_end(fetchData);
+                // release the base table
                 RelationClose(baseTableRel);
-            }
-            // close the base table
 
+            }
 
             // json_vector = index_tuple_get_pinecone_vector(index, itup);
             // cJSON_AddItemToArray(json_vectors, json_vector);
