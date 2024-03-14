@@ -15,7 +15,7 @@ int pinecone_requests_per_batch = 40;
 int pinecone_max_buffer_scan = 10000; // maximum number of tuples to search in the buffer
 int pinecone_max_fetched_vectors_for_liveness_check = 10;
 #ifdef PINECONE_MOCK
-char* pinecone_mock_response = NULL;
+bool pinecone_use_mock_response = false;
 #endif
 
 // todo: principled batch sizes. Do we ever want the buffer to be bigger than a multi-insert? Possibly if we want to let the buffer fill up when the remote index is down.
@@ -74,10 +74,11 @@ void PineconeInit(void)
                             PGC_USERSET,
                             0, NULL, NULL, NULL);
     #ifdef PINECONE_MOCK
-    DefineCustomStringVariable("pinecone.mock_response", "Pinecone mock response", "Pinecone mock response",
-                              &pinecone_mock_response, "", 
-                              PGC_USERSET, 
-                              0, NULL, NULL, NULL); 
+    DefineCustomBoolVariable("pinecone.use_mock_response", "Pinecone use mock response", "Pinecone use mock response",
+                            &pinecone_use_mock_response,
+                            false,
+                            PGC_USERSET,
+                            0, NULL, NULL, NULL);
     #endif
     MarkGUCPrefixReserved("pinecone");
 }

@@ -54,6 +54,7 @@ void set_curl_options(CURL *hnd, const char *api_key, const char *url, const cha
     curl_easy_setopt(hnd, CURLOPT_URL, url);
     curl_easy_setopt(hnd, CURLOPT_WRITEDATA, response_data);
     curl_easy_setopt(hnd, CURLOPT_WRITEFUNCTION, write_callback);
+    strcpy(response_data->method, method); // save the method in the response_data
 }
 
 // Declare the CURL handle as a global variable
@@ -65,33 +66,39 @@ cJSON* generic_pinecone_request(const char *api_key, const char *url, const char
     cJSON *response_json, *error;
     CURLcode ret;
 
-    #ifdef PINECONE_MOCK
-    if (strcmp(pinecone_mock_response, "") != 0) {
-        elog(NOTICE, "Using mock response");
-        response_json = cJSON_Parse(pinecone_mock_response);
-        pinecone_mock_response = ""; // reset the mock response
-        return response_json;
-    }
-    #endif
-
     // Initialize the CURL handle if it hasn't been initialized yet
     if (hnd_t == NULL) {
-        elog(NOTICE, "Initializing CURL handle");
+        elog(DEBUG2, "Initializing CURL handle");
         hnd_t = curl_easy_init();
         if (hnd_t == NULL) {
             elog(ERROR, "Failed to initialize CURL handle");
         }
     }
 
-    // make the network request
+    // prepare the request
     set_curl_options(hnd_t, api_key, url, method, &response_data);
     if (body != NULL) {
-        curl_easy_setopt(hnd_t, CURLOPT_POSTFIELDS, cJSON_Print(body));
+        char* body_str = cJSON_Print(body);
+        response_data.request_body = body_str;
+        curl_easy_setopt(hnd_t, CURLOPT_POSTFIELDS, body_str);
     }
+
+    // perform the request
+    #ifdef PINECONE_MOCK
+    if (pinecone_use_mock_response) {
+        lookup_mock_response(hnd_t, &response_data, &ret);
+        elog(DEBUG1, "Mock response: %s", response_data.data);
+        elog(DEBUG1, "Mock response ret: %d", ret);
+    } else {
+    #endif
     ret = curl_easy_perform(hnd_t);
+    #ifdef PINECONE_MOCK
+    }
+    #endif
 
     // cleanup
     curl_easy_reset(hnd_t);
+
 
     // TODO: We need check the ret code in the other endpoints as well
     if (ret != CURLE_OK) {
@@ -122,12 +129,8 @@ cJSON* describe_index(const char *api_key, const char *index_name) {
 
 cJSON* pinecone_get_index_stats(const char *api_key, const char *index_host) {
     cJSON* resp;
-    clock_t start, stop;
     char url[100] = "https://"; strcat(url, index_host); strcat(url, "/describe_index_stats");
-    start = clock();
     resp = generic_pinecone_request(api_key, url, "GET", NULL);
-    stop = clock();
-    elog(NOTICE, "Getting index stats took %f seconds (praying)", (double)(stop - start) / CLOCKS_PER_SEC);
     return resp;
 }
 
@@ -189,8 +192,10 @@ cJSON** pinecone_query_with_fetch(const char *api_key, const char *index_host, c
     ResponseData fetch_response_data = {"", NULL, NULL, 0};
     clock_t start, stop;
     int running;
+
+
+
     if (multi_hnd_for_query == NULL) {
-        elog(NOTICE, "Initializing CURL multi handle for QUERY");
         multi_hnd_for_query = curl_multi_init();
         if (multi_hnd_for_query == NULL) {
             elog(ERROR, "Failed to initialize CURL multi handle");
@@ -207,6 +212,20 @@ cJSON** pinecone_query_with_fetch(const char *api_key, const char *index_host, c
 
     // todo: does curl let you specify an allocator like cJSON?
 
+
+    // perform the request
+    #ifdef PINECONE_MOCK
+    if (pinecone_use_mock_response) {
+        CURLcode query_ret, fetch_ret;
+        lookup_mock_response(query_handle, &query_response_data, &query_ret);
+        elog(DEBUG1, "Mock query response: %s", query_response_data.data);
+        if (with_fetch) {
+            lookup_mock_response(fetch_handle, &fetch_response_data, &fetch_ret);
+            elog(DEBUG1, "Mock fetch response: %s", fetch_response_data.data);
+        }
+    } else {
+    #endif
+
     // start time
     start = clock();
     // run the handles
@@ -221,11 +240,18 @@ cJSON** pinecone_query_with_fetch(const char *api_key, const char *index_host, c
         }
         curl_multi_perform(multi_hnd_for_query, &running);
     }
-    // curl_multi_cleanup(multi_hnd_for_query);  // TODO iterate thru and cleanup handles.
+    curl_easy_reset(query_handle);
+    if (with_fetch) {
+        curl_easy_reset(fetch_handle);
+    }
     // TODO: figure out exactly what is necessary: deleting multi_cleanup or reusing the same multihandle
     // stop time
     stop = clock();
-    elog(NOTICE, "Query and fetch took %f seconds", (double)(stop - start) / CLOCKS_PER_SEC);
+    elog(DEBUG2, "Query and fetch took %f seconds", (double)(stop - start) / CLOCKS_PER_SEC);
+
+    #ifdef PINECONE_MOCK
+    }
+    #endif
 
 
     // parse the responses
@@ -235,7 +261,7 @@ cJSON** pinecone_query_with_fetch(const char *api_key, const char *index_host, c
         responses[1] = cJSON_Parse(fetch_response_data.data);
     }
     stop = clock();
-    elog(NOTICE, "Parsing responses took %f seconds", (double)(stop - start) / CLOCKS_PER_SEC);
+    elog(DEBUG2, "Parsing responses took %f seconds", (double)(stop - start) / CLOCKS_PER_SEC);
 
     return responses;
 }
@@ -245,24 +271,36 @@ cJSON* pinecone_bulk_upsert(const char *api_key, const char *index_host, cJSON *
     cJSON *batches = batch_vectors(vectors, batch_size);
     cJSON *batch;
     CURL* batch_handle;
-    ResponseData* response_data = palloc(sizeof(ResponseData) * cJSON_GetArraySize(batches));
+    int n_batches = cJSON_GetArraySize(batches);
+    ResponseData* response_data = palloc(sizeof(ResponseData) * n_batches);
+    CURL** handles = palloc(sizeof(CURL*) * n_batches);
     int running;
     if (multi_handle == NULL) {
-        elog(NOTICE, "Initializing CURL multi handle for BULK II");
         multi_handle = curl_multi_init();
         if (multi_handle == NULL) {
             elog(ERROR, "Failed to initialize CURL multi handle");
         }
     }
 
-    for (int i = 0; i < cJSON_GetArraySize(batches); i++) {
+    for (int i = 0; i < n_batches; i++) {
         batch = cJSON_GetArrayItem(batches, i);
         response_data[i] = (ResponseData) {"", NULL, NULL, 0};
         batch_handle = get_pinecone_upsert_handle(api_key, index_host, cJSON_Duplicate(batch, true), &response_data[i]); // TODO: figure out why i have to deepcopy // because batch goes out of scope
+        handles[i] = batch_handle;
         curl_multi_add_handle(multi_handle, batch_handle);
     }
     cJSON_Delete(batches);
 
+    #ifdef PINECONE_MOCK
+    if (pinecone_use_mock_response) {
+        for (int i = 0; i < n_batches; i++) {
+            CURLcode ret;
+            lookup_mock_response(handles[i], &response_data[i], &ret);
+            elog(DEBUG1, "Mock response: %s", response_data[i].data);
+        }
+    } else {
+    #endif
+    
     // run the handles
     curl_multi_perform(multi_handle, &running);
     while (running) {
@@ -275,11 +313,14 @@ cJSON* pinecone_bulk_upsert(const char *api_key, const char *index_host, cJSON *
         }
         curl_multi_perform(multi_handle, &running);
     }
-    // curl_multi_cleanup(multi_handle);  // TODO iterate thru and cleanup handles.
-    // curl_global_cleanup();
+    for (int i = 0; i < n_batches; i++) {
+        curl_easy_reset(handles[i]);
+    }
+    #ifdef PINECONE_MOCK
+    }
+    #endif
 
     // todo: check the responses from upsert
-
     // todo: free the response.data
     return NULL;
 }
@@ -288,10 +329,8 @@ CURL* query_handle;
 CURL* get_pinecone_query_handle(const char *api_key, const char *index_host, const int topK, cJSON *query_vector_values, cJSON *filter, ResponseData* response_data) {
     cJSON *body = cJSON_CreateObject();
     char* body_str;
-    clock_t start, stop;
     char url[100] = "https://"; strcat(url, index_host); strcat(url, "/query"); // e.g. https://t1-23kshha.svc.apw5-4e34-81fa.pinecone.io/query
     if (query_handle == NULL) {
-        elog(NOTICE, "Initializing CURL handle for QUERY");
         query_handle = curl_easy_init();
         if (query_handle == NULL) {
             elog(ERROR, "Failed to initialize CURL handle");
@@ -302,16 +341,11 @@ CURL* get_pinecone_query_handle(const char *api_key, const char *index_host, con
     cJSON_AddItemToObject(body, "filter", filter);
     cJSON_AddItemToObject(body, "includeValues", cJSON_CreateFalse());
     cJSON_AddItemToObject(body, "includeMetadata", cJSON_CreateFalse());
-    elog(DEBUG1, "Querying index %s with payload: %s", index_host, cJSON_Print(body));
     query_handle = curl_easy_init();
-    start = clock();
     body_str = cJSON_Print(body);
+    elog(DEBUG1, "Querying index %s with payload: %s", index_host, body_str);
     cJSON_Delete(body);
-    stop = clock();
-    // cJSON_Parse(body_str);
-    // stop2 = clock();
-    elog(NOTICE, "Printing body of query to body_str took %f seconds", (double)(stop - start) / CLOCKS_PER_SEC);
-    // elog(NOTICE, "Parsing body_str to cJSON took %f seconds", (double)(stop2 - stop) / CLOCKS_PER_SEC);
+    // 
     strcpy(response_data->message, "querying index");
     response_data->request_body = body_str;
     set_curl_options(query_handle, api_key, url, "POST", response_data);
@@ -341,7 +375,6 @@ CURL* get_pinecone_fetch_handle(const char *api_key, const char *index_host, cJS
     char url[2048] = "https://"; // we fetch up to 100 vectors and have 12 chars per vector id + &ids= is 17chars/vec
     strcat(url, index_host); strcat(url, "/vectors/fetch?"); // https://t1-23kshha.svc.apw5-4e34-81fa.pinecone.io/vectors/upsert
     if (fetch_handle == NULL) {
-        elog(NOTICE, "Initializing CURL handle for FETCH");
         fetch_handle = curl_easy_init();
         if (fetch_handle == NULL) {
             elog(ERROR, "Failed to initialize CURL handle");
@@ -378,4 +411,3 @@ cJSON* batch_vectors(cJSON *vectors, int batch_size) {
     cJSON_AddItemToArray(batches, batch);
     return batches;
 }
-

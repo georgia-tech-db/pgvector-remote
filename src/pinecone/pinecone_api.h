@@ -13,6 +13,7 @@ typedef struct {
     char *request_body;
     char *data;
     size_t length;
+    char method[10]; // GET, POST, DELETE, etc.
 } ResponseData;
 
 size_t write_callback(char *contents, size_t size, size_t nmemb, void *userdata);
@@ -33,5 +34,8 @@ CURL* get_pinecone_query_handle(const char *api_key, const char *index_host, con
 CURL* get_pinecone_upsert_handle(const char *api_key, const char *index_host, cJSON *vectors, ResponseData* response_data);
 CURL* get_pinecone_fetch_handle(const char *api_key, const char *index_host, cJSON* ids, ResponseData* response_data);
 cJSON* batch_vectors(cJSON *vectors, int batch_size);
+#ifdef PINECONE_MOCK
+void mock_netcall(const char *url, const char *method, cJSON *body, ResponseData *response_data, CURLcode *ret);
+#endif
 
 #endif // PINECONE_API_H

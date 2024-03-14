@@ -138,7 +138,7 @@ extern int pinecone_max_fetched_vectors_for_liveness_check;
 #define PINECONE_BATCH_SIZE pinecone_vectors_per_request * pinecone_requests_per_batch
 // GUC variables for testing
 #ifdef PINECONE_MOCK
-extern char* pinecone_mock_response;
+extern bool pinecone_use_mock_response;
 #endif
 
 // function declarations
@@ -224,6 +224,7 @@ uint32 hash_tid(ItemPointerData tid, int seed);
 
 // helpers
 Oid get_index_oid_from_name(char* index_name);
+void lookup_mock_response(CURL* hnd, ResponseData* response_data, CURLcode* curl_code);
 
 
 // misc.

@@ -186,7 +186,6 @@ bool pinecone_insert(Relation index, Datum *values, bool *isnull, ItemPointer he
     if (checkpoint_created) {
         elog(DEBUG1, "Checkpoint created. Flushing to Pinecone");
         FlushToPinecone(index);
-        pinecone_print_relation(index);
     }
 
     // log the state of the relation for debugging
@@ -263,10 +262,6 @@ void FlushToPinecone(Relation index)
                                                       errmsg("Item is not used")));
             if (item == NULL) ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
                                               errmsg("Item is null")));
-            // if the blkno is 0
-            if (buffer_tup.tid.ip_blkid.bi_hi == 0 && buffer_tup.tid.ip_blkid.bi_lo == 0) {
-                ereport(NOTICE, errmsg("Block number is 0"));
-            }
 
             // log the tid of the index tuple
             elog(DEBUG1, "Flushing tuple with tid %d:%d", ItemPointerGetBlockNumber(&buffer_tup.tid), ItemPointerGetOffsetNumber(&buffer_tup.tid));
@@ -299,7 +294,6 @@ void FlushToPinecone(Relation index)
 
             vector_id = pinecone_id_from_heap_tid(buffer_tup.tid);
             json_vector = tuple_get_pinecone_vector(index->rd_att, index_values, index_isnull, vector_id);
-            elog(NOTICE, "Got the json vector: %s", cJSON_Print(json_vector));
             cJSON_AddItemToArray(json_vectors, json_vector);
 
         }

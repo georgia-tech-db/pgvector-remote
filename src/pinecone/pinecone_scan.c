@@ -292,7 +292,7 @@ void load_buffer_into_sort(Relation index, PineconeScanOpaque so, Datum query_da
 
         // add all tuples on the page to the sortstate
         for (OffsetNumber offno = FirstOffsetNumber; offno <= PageGetMaxOffsetNumber(page); offno = OffsetNumberNext(offno)) {
-            // TODO: get the tid and the vector from the heap tuple
+            // get the tid and the vector from the heap tuple
             ItemId itemid;
             Item item;
             PineconeBufferTuple buffer_tup;
@@ -309,7 +309,9 @@ void load_buffer_into_sort(Relation index, PineconeScanOpaque so, Datum query_da
             // fetch the vector from the base table
             found = baseTableRel->rd_tableam->index_fetch_tuple(fetchData, &buffer_tup.tid, snapshot, base_table_slot, &call_again, &all_dead);
             if (!found) {
-                elog(ERROR, "could not find tuple in base table");
+                elog(DEBUG2, "could not find tuple in base table");
+                elog(DEBUG2, "call_again: %d, all_dead: %d", call_again, all_dead);
+                continue; // do not add the tuple to the sortstate
             }
 
             // extract the indexed columns
