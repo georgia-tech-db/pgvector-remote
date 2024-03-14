@@ -208,15 +208,25 @@ void FlushToPinecone(Relation index)
     cJSON* json_vectors = cJSON_CreateArray();
     bool success;
 
-    // index info
-    IndexInfo *indexInfo = BuildIndexInfo(index);
-    Datum* index_values = (Datum*) palloc(sizeof(Datum) * indexInfo->ii_NumIndexAttrs);
-    bool* index_isnull = (bool*) palloc(sizeof(bool) * indexInfo->ii_NumIndexAttrs);
-
     // take a snapshot of the buffer meta
     // we don't need to worry about another transaction advancing the pinecone tail because we have the pinecone insertion lock
     PineconeStaticMetaPageData static_meta = PineconeSnapshotStaticMeta(index);
     PineconeBufferMetaPageData buffer_meta = PineconeSnapshotBufferMeta(index);
+
+
+    // index info
+    IndexInfo *indexInfo = BuildIndexInfo(index);
+    Datum* index_values = (Datum*) palloc(sizeof(Datum) * indexInfo->ii_NumIndexAttrs);
+    bool* index_isnull = (bool*) palloc(sizeof(bool) * indexInfo->ii_NumIndexAttrs);
+    // get the base table
+    Oid baseTableOid = index->rd_index->indrelid;
+    Relation baseTableRel = RelationIdGetRelation(baseTableOid);
+    Snapshot snapshot = GetActiveSnapshot();
+    // begin the index fetch (this the preferred way for an index to request tuples from its base table)
+    IndexFetchTableData *fetchData = baseTableRel->rd_tableam->index_fetch_begin(baseTableRel);
+    TupleTableSlot *slot = MakeSingleTupleTableSlot(baseTableRel->rd_att, &TTSOpsBufferHeapTuple);
+    bool call_again, all_dead, found;
+    char* vector_id; // todo: free
 
     // acquire the pinecone insertion lock
     LOCKTAG pinecone_flush_lock;
@@ -242,74 +252,60 @@ void FlushToPinecone(Relation index)
     // iterate through the pages
     while (true)
     {
-        // IndexTuple itup = NULL;
-
         // Add all tuples on the page.
         for (int i = 1; i <= PageGetMaxOffsetNumber(page); i++)
         {
             cJSON* json_vector;
-            PineconeBufferTuple buffer_tup = *((PineconeBufferTuple*) PageGetItem(page, PageGetItemId(page, i)));
+            ItemId itemid = PageGetItemId(page, i);
+            Item item = PageGetItem(page, itemid);
+            PineconeBufferTuple buffer_tup = *((PineconeBufferTuple*) item);
+            if (!ItemIdIsUsed(itemid)) ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                                                      errmsg("Item is not used")));
+            if (item == NULL) ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                                              errmsg("Item is null")));
+            // if the blkno is 0
+            if (buffer_tup.tid.ip_blkid.bi_hi == 0 && buffer_tup.tid.ip_blkid.bi_lo == 0) {
+                ereport(NOTICE, errmsg("Block number is 0"));
+            }
+
             // log the tid of the index tuple
             elog(DEBUG1, "Flushing tuple with tid %d:%d", ItemPointerGetBlockNumber(&buffer_tup.tid), ItemPointerGetOffsetNumber(&buffer_tup.tid));
 
-            // extern bool heap_fetch(Relation relation, Snapshot snapshot,
-            //  HeapTuple tuple, Buffer *userbuf, bool keep_buf);
-            // get a snapshot, fetch the tuple from the heap and print the datums
-            {
-                // get the base table
-                Oid baseTableOid = index->rd_index->indrelid;
-                Relation baseTableRel = RelationIdGetRelation(baseTableOid);
-                Snapshot snapshot = GetActiveSnapshot();
-                char* vector_id; // todo: free
+            // fetch the tuple from the base table
+            found = baseTableRel->rd_tableam->index_fetch_tuple(fetchData, &buffer_tup.tid, snapshot, slot, &call_again, &all_dead);
 
-                // get the tuple
-                IndexFetchTableData *fetchData = baseTableRel->rd_tableam->index_fetch_begin(baseTableRel);
-                TupleTableSlot *slot = MakeSingleTupleTableSlot(baseTableRel->rd_att, &TTSOpsBufferHeapTuple);
-                bool call_again, all_dead, found;
-                found = baseTableRel->rd_tableam->index_fetch_tuple(fetchData, &buffer_tup.tid, snapshot, slot, &call_again, &all_dead);
-
-                // print the tuple
-                if (!found) {
-                    ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
-                                    errmsg("Tuple not found in heap")));
-                } else {
-                    // todo: cut this else block
-                    elog(NOTICE, "Fetched tuple from heap");
-                    for (int k = 0; k < baseTableRel->rd_att->natts; k++) {
-                        bool isnull;
-                        FormData_pg_attribute attr = baseTableRel->rd_att->attrs[k];
-                        Datum datum = slot_getattr(slot, k + 1, &isnull);
-                        if (!isnull) {
-                            int datum_str = DatumGetInt32(datum);
-                            elog(NOTICE, "Attribute %s: %d", NameStr(attr.attname), datum_str);
-                        }
-                    }
-                    elog(NOTICE, "That tuple had n attributes where n = %d", baseTableRel->rd_att->natts);
-                }
-
-                // extract the indexed columns
-                FormIndexDatum(indexInfo, slot, NULL, index_values, index_isnull);
-
-                vector_id = pinecone_id_from_heap_tid(buffer_tup.tid);
-                json_vector = tuple_get_pinecone_vector(index->rd_att, index_values, index_isnull, vector_id);
-                elog(NOTICE, "Got the json vector: %s", cJSON_Print(json_vector));
-                cJSON_AddItemToArray(json_vectors, json_vector);
-
-                // todo: do this outside of the loop
-                // close the slot and the fetch data
-                ExecDropSingleTupleTableSlot(slot);
-                baseTableRel->rd_tableam->index_fetch_end(fetchData);
-                // release the base table
-                RelationClose(baseTableRel);
-
+            // print the tuple
+            if (!found) {
+                ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                                errmsg("Tuple not found in heap")));
             }
+            // else {
+                // // todo: cut this else block
+                // elog(NOTICE, "Fetched tuple from heap");
+                // for (int k = 0; k < baseTableRel->rd_att->natts; k++) {
+                    // bool isnull;
+                    // FormData_pg_attribute attr = baseTableRel->rd_att->attrs[k];
+                    // Datum datum = slot_getattr(slot, k + 1, &isnull);
+                    // if (!isnull) {
+                        // int datum_str = DatumGetInt32(datum);
+                        // elog(NOTICE, "Attribute %s: %d", NameStr(attr.attname), datum_str);
+                    // }
+                // }
+                // elog(NOTICE, "That tuple had n attributes where n = %d", baseTableRel->rd_att->natts);
+            // }
 
-            // json_vector = index_tuple_get_pinecone_vector(index, itup);
-            // cJSON_AddItemToArray(json_vectors, json_vector);
+            // extract the indexed columns
+            FormIndexDatum(indexInfo, slot, NULL, index_values, index_isnull);
+
+            vector_id = pinecone_id_from_heap_tid(buffer_tup.tid);
+            json_vector = tuple_get_pinecone_vector(index->rd_att, index_values, index_isnull, vector_id);
+            elog(NOTICE, "Got the json vector: %s", cJSON_Print(json_vector));
+            cJSON_AddItemToArray(json_vectors, json_vector);
+
         }
 
         // Move to the next page. Stop if there are no more pages.
-        // todo: isn't an opaque unnecessary? Couldn't I just use nextblkno++ and check if it's valid?
+        // todo: isn't this linked list unnecessary? Couldn't I just use nextblkno++ and check if it's valid?
         currentblkno = PineconePageGetOpaque(page)->nextblkno;
         if (!BlockNumberIsValid(currentblkno)) break; 
 
@@ -345,6 +341,12 @@ void FlushToPinecone(Relation index)
         }
     }
     UnlockReleaseBuffer(buf); // release the last buffer
+
+    // end the index fetch
+    ExecDropSingleTupleTableSlot(slot);
+    baseTableRel->rd_tableam->index_fetch_end(fetchData);
+    // close the base table
+    RelationClose(baseTableRel);
 
     // release the lock
     LockRelease(&pinecone_flush_lock, ExclusiveLock, false);
