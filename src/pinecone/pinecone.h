@@ -33,6 +33,9 @@
 #define PINECONE_NAME_MAX_LENGTH 45
 #define PINECONE_HOST_MAX_LENGTH 100
 
+#define DEFAULT_SPEC "{}"
+#define DEFAULT_HOST ""
+
 // structs
 typedef struct PineconeScanOpaqueData
 {
@@ -46,6 +49,8 @@ typedef struct PineconeScanOpaqueData
     TupleTableSlot *slot; // TODO ??
     bool isnull;
     bool more_buffer_tuples;
+    char* bloom_filter;
+    size_t bloom_filter_size;
 
     // support functions
     FmgrInfo *procinfo;
@@ -77,6 +82,9 @@ typedef struct PineconeOptions
 {
 	int32		vl_len_;		/* varlena header (do not touch directly!) */
     int         spec; // spec is a string; this is its offset in the rd_options
+    int         host;
+    bool        overwrite; // todo: should this be int?
+    bool        skip_build;
 }			PineconeOptions;
 
 typedef struct PineconeCheckpoint
@@ -113,6 +121,13 @@ typedef struct PineconeBufferOpaqueData
 typedef PineconeBufferOpaqueData *PineconeBufferOpaque;
 
 
+typedef struct PineconeBufferTuple
+{
+    ItemPointerData tid;
+    int16 flags;
+} PineconeBufferTuple;
+#define PINECONE_BUFFER_TUPLE_VACUUMED 1 << 0
+
 // GUC variables
 extern char* pinecone_api_key;
 extern int pinecone_top_k;
@@ -121,6 +136,10 @@ extern int pinecone_requests_per_batch;
 extern int pinecone_max_buffer_scan;
 extern int pinecone_max_fetched_vectors_for_liveness_check;
 #define PINECONE_BATCH_SIZE pinecone_vectors_per_request * pinecone_requests_per_batch
+// GUC variables for testing
+#ifdef PINECONE_MOCK
+extern char* pinecone_mock_response;
+#endif
 
 // function declarations
 
@@ -167,6 +186,7 @@ void no_endscan(IndexScanDesc scan);
 PineconeCheckpoint* get_checkpoints_to_fetch(Relation index);
 PineconeCheckpoint get_best_fetched_checkpoint(Relation index, PineconeCheckpoint* checkpoints, cJSON* fetch_results);
 cJSON *fetch_ids_from_checkpoints(PineconeCheckpoint *checkpoints);
+#define BUFFER_BLOOM_K 20 // bloom filter k 
 
 
 
@@ -177,6 +197,7 @@ IndexBulkDeleteResult *no_vacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteRe
 
 // validate
 void pinecone_spec_validator(const char *spec);
+void pinecone_host_validator(const char *spec);
 void validate_api_key(void);
 void validate_vector_nonzero(Vector* vector);
 bool no_validate(Oid opclassoid);
@@ -185,6 +206,7 @@ bool no_validate(Oid opclassoid);
 // converting between postgres tuples and json vectors
 cJSON* tuple_get_pinecone_vector(TupleDesc tup_desc, Datum *values, bool *isnull, char *vector_id);
 cJSON* index_tuple_get_pinecone_vector(Relation index, IndexTuple itup);
+cJSON* heap_tuple_get_pinecone_vector(Relation heap, HeapTuple htup);
 char* pinecone_id_from_heap_tid(ItemPointerData heap_tid);
 ItemPointerData pinecone_id_get_heap_tid(char *id);
 // read and write meta pages
@@ -196,6 +218,9 @@ char* checkpoint_to_string(PineconeCheckpoint checkpoint);
 char* buffer_meta_to_string(PineconeBufferMetaPageData buffer_meta);
 char* buffer_opaque_to_string(PineconeBufferOpaqueData buffer_opaque);
 void pinecone_print_relation(Relation index);
+// hashing and bloom filters
+uint64 murmurhash64(uint64 data);
+uint32 hash_tid(ItemPointerData tid, int seed);
 
 // helpers
 Oid get_index_oid_from_name(char* index_name);

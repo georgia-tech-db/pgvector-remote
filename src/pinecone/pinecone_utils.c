@@ -53,6 +53,17 @@ cJSON* index_tuple_get_pinecone_vector(Relation index, IndexTuple itup) {
     return tuple_get_pinecone_vector(itup_desc, itup_values, itup_isnull, vector_id);
 }
 
+cJSON* heap_tuple_get_pinecone_vector(Relation heap, HeapTuple htup) {
+    int natts = heap->rd_att->natts;
+    Datum *htup_values = (Datum *) palloc(sizeof(Datum) * natts);
+    bool *htup_isnull = (bool *) palloc(sizeof(bool) * natts);
+    TupleDesc htup_desc = heap->rd_att;
+    char* vector_id;
+    heap_deform_tuple(htup, htup_desc, htup_values, htup_isnull);
+    vector_id = pinecone_id_from_heap_tid(htup->t_self);
+    return tuple_get_pinecone_vector(htup_desc, htup_values, htup_isnull, vector_id);
+}
+
 ItemPointerData pinecone_id_get_heap_tid(char *id)
 {
     ItemPointerData heap_tid;
@@ -199,3 +210,35 @@ void pinecone_print_relation(Relation index) {
     }
 }
 
+
+// murmur hash lifted from hnswutils.c
+uint64
+murmurhash64(uint64 data)
+{
+	uint64		h = data;
+
+	h ^= h >> 33;
+	h *= 0xff51afd7ed558ccd;
+	h ^= h >> 33;
+	h *= 0xc4ceb9fe1a85ec53;
+	h ^= h >> 33;
+
+	return h;
+}
+
+/* TID hash table */
+uint32
+hash_tid(ItemPointerData tid, int seed)
+{
+	union
+	{
+		uint64		i;
+		ItemPointerData tid;
+	}			x;
+
+	/* Initialize unused bytes */
+	x.i = 0;
+	x.tid = tid;
+
+	return murmurhash64(x.i + seed);
+}
