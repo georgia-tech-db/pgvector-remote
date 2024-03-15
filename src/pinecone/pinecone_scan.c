@@ -58,7 +58,7 @@ PineconeCheckpoint get_best_fetched_checkpoint(Relation index, PineconeCheckpoin
     // todo: add timestamping so that we can assume that if the pinecone page is sufficiently old, we can assume it is live. (simple)
 
     // preprocess the results from a json object to a list of ItemPointerData
-    PineconeCheckpoint best_checkpoint = {INVALID_CHECKPOINT_NUMBER, InvalidBlockNumber, {{0, 0},0}, 0};
+    PineconeCheckpoint best_checkpoint = {INVALID_CHECKPOINT_NUMBER, InvalidBlockNumber, {{0, 0},0}, 0, true};
     cJSON* vectors = cJSON_GetObjectItemCaseSensitive(fetch_results, "vectors");
     cJSON* vector;
     clock_t start, end;
