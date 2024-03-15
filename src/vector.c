@@ -1197,3 +1197,27 @@ vector_avg(PG_FUNCTION_ARGS)
 
 	PG_RETURN_POINTER(result);
 }
+
+
+/*
+ * Convert sparse vector to dense vector
+ */
+PGDLLEXPORT PG_FUNCTION_INFO_V1(svector_to_vector);
+Datum
+svector_to_vector(PG_FUNCTION_ARGS)
+{
+	SVector    *svec = PG_GETARG_SVECTOR_P(0);
+	int32		typmod = PG_GETARG_INT32(1);
+	Vector	   *result;
+	int			dim = svec->dim;
+	float	   *values = SVECTOR_VALUES(svec);
+
+	CheckDim(dim);
+	CheckExpectedDim(typmod, dim);
+
+	result = InitVector(dim);
+	for (int i = 0; i < svec->nnz; i++)
+		result->x[svec->indices[i]] = values[i];
+
+	PG_RETURN_POINTER(result);
+}
