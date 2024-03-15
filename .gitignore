@@ -15,3 +15,5 @@ regression.*
 src/todo.md
 .vscode/c_cpp_properties.json
 .vscode/settings.json
+todo.md
+logfile
