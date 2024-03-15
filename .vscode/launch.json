@@ -1,11 +1,12 @@
 {
     "version": "0.2.0",
     "configurations": [
+
         {
             "name": "Attach to Process",
             "type": "cppdbg",
             "request": "attach",
-            "program": "/usr/lib/postgresql/16/bin/postgres",
+            "program": "/usr/local/pgsql/bin/postgres",
             "processId": "${command:pickProcess}",
             "MIMode": "gdb",
             "miDebuggerPath": "/usr/bin/gdb"

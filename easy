@@ -1,0 +1,2 @@
+#!/usr/bin/fish
+sudo /usr/bin/gdb $argv

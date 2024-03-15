@@ -41,7 +41,7 @@ char* get_pinecone_index_name(Relation index) {
     for (int i = 0; i < name_length; i++) {
         if (!isalnum(pinecone_index_name[i]) && pinecone_index_name[i] != '-') {
             elog(DEBUG1, "Invalid character: %c", pinecone_index_name[i]);
-            ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("Pinecone index name contains invalid characters"), errhint("The pinecone index name can only contain alphanumeric characters and hyphens.")));
+            ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("Pinecone index name (%s) contains invalid character %c", pinecone_index_name, pinecone_index_name[i]), errhint("The pinecone index name can only contain alphanumeric characters and hyphens.")));
         }
     }
     return pinecone_index_name;
@@ -56,15 +56,44 @@ IndexBuildResult *pinecone_build(Relation heap, Relation index, IndexInfo *index
     cJSON* spec_json = cJSON_Parse(GET_STRING_RELOPTION(opts, spec));
     int dimensions = TupleDescAttr(index->rd_att, 0)->atttypmod;
     char* pinecone_index_name = get_pinecone_index_name(index);
-    char* host;
+    char* host = GET_STRING_RELOPTION(opts, host);
+    cJSON* describe_index_response;
 
     validate_api_key();
-    // create the remote index and get its hostname
-    host = CreatePineconeIndexAndWait(index, spec_json, metric, pinecone_index_name, dimensions);
+
+    // if the host is not specified, create a remote index and get the host
+    if (strcmp(host, DEFAULT_HOST) == 0) {
+        elog(DEBUG1, "Host not specified in reloptions, creating remote index from spec...");
+        host = CreatePineconeIndexAndWait(index, spec_json, metric, pinecone_index_name, dimensions);
+    }
+
+
+    // Describe the index.
+    describe_index_response = pinecone_get_index_stats(pinecone_api_key, host);
+    // if the host is specified, check that it is empty
+    if (strcmp(host, DEFAULT_HOST) != 0) {
+        elog(DEBUG1, "Host specified in reloptions, checking if it is empty. Got response: %s", cJSON_Print(describe_index_response));
+        // todo: check if the index is empty, check that the dimensions and metric match
+        // todo: emit warning when pods fill up
+    }
+
+    // if overwrite is true, delete all vectors in the remote index
+    if (opts->overwrite) {
+        elog(DEBUG1, "Overwrite is true, deleting all vectors in remote index...");
+        pinecone_delete_all(pinecone_api_key, host);
+    }
+
     // init the index pages: static meta, buffer meta, and buffer head
     InitIndexPages(index, metric, dimensions, pinecone_index_name, host, MAIN_FORKNUM);
+
     // iterate through the base table and upsert the vectors to the remote index
-    InsertBaseTable(heap, index, indexInfo, host, result);
+    if (opts->skip_build) {
+        elog(DEBUG1, "Skipping build");
+        result->heap_tuples = 0;
+        result->index_tuples = 0;
+    } else {
+        InsertBaseTable(heap, index, indexInfo, host, result);
+    }
     return result;
 }
 

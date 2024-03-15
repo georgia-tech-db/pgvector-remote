@@ -5,6 +5,10 @@
 #include "utils/memutils.h"
 #include "storage/lmgr.h"
 #include "miscadmin.h" // MyDatabaseId
+#include <catalog/index.h>
+
+#include <access/heapam.h>
+#include <access/tableam.h>
 
 #define PINECONE_FLUSH_LOCK_IDENTIFIER 1969841813 // random number, uniquely identifies the pinecone insertion lock
 #define PINECONE_APPEND_LOCK_IDENTIFIER 1969841814 // random number, uniquely identifies the pinecone append lock
@@ -30,7 +34,7 @@ void PineconePageInit(Page page, Size pageSize)
  */
 bool AppendBufferTuple(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heapRel)
 {
-    IndexTuple itup;
+    // IndexTuple itup;
     GenericXLogState *state;
     Buffer buffer_meta_buf, insert_buf, newbuf = InvalidBuffer;
     Page buffer_meta_page, insert_page, newpage;
@@ -44,9 +48,14 @@ bool AppendBufferTuple(Relation index, Datum *values, bool *isnull, ItemPointer 
     bool create_checkpoint = false;
     
     // prepare the index tuple
-    itup = index_form_tuple(RelationGetDescr(index), values, isnull);
-    itup->t_tid = *heap_tid;
-    itemsz = MAXALIGN(IndexTupleSize(itup));
+    // itup = index_form_tuple(RelationGetDescr(index), values, isnull);
+    // itup->t_tid = *heap_tid;
+    // itemsz = MAXALIGN(IndexTupleSize(itup));
+    
+    //
+    PineconeBufferTuple buffer_tid;
+    buffer_tid.tid = *heap_tid;
+    itemsz = MAXALIGN(sizeof(PineconeBufferTuple));
 
     /* LOCKING STRATEGY FOR INSERTION
      * acquire append lock
@@ -86,7 +95,9 @@ bool AppendBufferTuple(Relation index, Datum *values, bool *isnull, ItemPointer 
 
     // add item to insert page
     if (!full && !create_checkpoint) {
-        PageAddItem(insert_page, (Item) itup, itemsz, InvalidOffsetNumber, false, false);
+        // PageAddItem(insert_page, (Item) itup, itemsz, InvalidOffsetNumber, false, false);
+        PageAddItem(insert_page, (Item) &buffer_tid, itemsz, InvalidOffsetNumber, false, false);
+
         // log the number of items on this page MaxOffsetNumber
         elog(DEBUG1, "No new page! Page has %lu items", (unsigned long)PageGetMaxOffsetNumber(insert_page));
 
@@ -108,7 +119,8 @@ bool AppendBufferTuple(Relation index, Datum *values, bool *isnull, ItemPointer 
         // check that there is room on the new page
         if (PageGetFreeSpace(newpage) < itemsz) elog(ERROR, "A new page was created, but it doesn't have enough space for the new tuple");
         // add item to new page
-        PageAddItem(newpage, (Item) itup, itemsz, InvalidOffsetNumber, false, false);
+        // PageAddItem(newpage, (Item) itup, itemsz, InvalidOffsetNumber, false, false);
+        PageAddItem(newpage, (Item) &buffer_tid, itemsz, InvalidOffsetNumber, false, false);
         // update insert_page nextblkno
         newblkno = BufferGetBlockNumber(newbuf);
         PineconePageGetOpaque(insert_page)->nextblkno = newblkno;
@@ -121,7 +133,7 @@ bool AppendBufferTuple(Relation index, Datum *values, bool *isnull, ItemPointer 
             new_opaque = PineconePageGetOpaque(newpage);
             new_opaque->prev_checkpoint_blkno = buffer_meta->latest_checkpoint.blkno;
             new_opaque->checkpoint = buffer_meta->latest_checkpoint;
-            new_opaque->checkpoint.tid = itup->t_tid; // we will assume we have inserted up to this checkpoint if we see this tid in pinecone
+            new_opaque->checkpoint.tid = *heap_tid; // we will assume we have inserted up to this point if we see this in pinecone
             new_opaque->checkpoint.blkno = newblkno;
             new_opaque->checkpoint.checkpoint_no += 1;
             new_opaque->checkpoint.n_preceding_tuples += buffer_meta->n_tuples_since_last_checkpoint;
@@ -174,7 +186,6 @@ bool pinecone_insert(Relation index, Datum *values, bool *isnull, ItemPointer he
     if (checkpoint_created) {
         elog(DEBUG1, "Checkpoint created. Flushing to Pinecone");
         FlushToPinecone(index);
-        pinecone_print_relation(index);
     }
 
     // log the state of the relation for debugging
@@ -201,6 +212,21 @@ void FlushToPinecone(Relation index)
     PineconeStaticMetaPageData static_meta = PineconeSnapshotStaticMeta(index);
     PineconeBufferMetaPageData buffer_meta = PineconeSnapshotBufferMeta(index);
 
+
+    // index info
+    IndexInfo *indexInfo = BuildIndexInfo(index);
+    Datum* index_values = (Datum*) palloc(sizeof(Datum) * indexInfo->ii_NumIndexAttrs);
+    bool* index_isnull = (bool*) palloc(sizeof(bool) * indexInfo->ii_NumIndexAttrs);
+    // get the base table
+    Oid baseTableOid = index->rd_index->indrelid;
+    Relation baseTableRel = RelationIdGetRelation(baseTableOid);
+    Snapshot snapshot = GetActiveSnapshot();
+    // begin the index fetch (this the preferred way for an index to request tuples from its base table)
+    IndexFetchTableData *fetchData = baseTableRel->rd_tableam->index_fetch_begin(baseTableRel);
+    TupleTableSlot *slot = MakeSingleTupleTableSlot(baseTableRel->rd_att, &TTSOpsBufferHeapTuple);
+    bool call_again, all_dead, found;
+    char* vector_id; // todo: free
+
     // acquire the pinecone insertion lock
     LOCKTAG pinecone_flush_lock;
     SET_LOCKTAG_FLUSH(pinecone_flush_lock, index);
@@ -211,6 +237,7 @@ void FlushToPinecone(Relation index)
                         errhint("The pinecone insertion lock is currently held by another transaction. This is likely because the buffer is being advanced by another transaction. This is not an error, but it may cause a delay in the insertion of new vectors.")));
         return;
     }
+
 
     // get the first page
     buf = ReadBuffer(index, buffer_meta.flush_checkpoint.blkno);
@@ -224,19 +251,55 @@ void FlushToPinecone(Relation index)
     // iterate through the pages
     while (true)
     {
-        IndexTuple itup = NULL;
-
         // Add all tuples on the page.
         for (int i = 1; i <= PageGetMaxOffsetNumber(page); i++)
         {
             cJSON* json_vector;
-            itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, i));
-            json_vector = index_tuple_get_pinecone_vector(index, itup);
+            ItemId itemid = PageGetItemId(page, i);
+            Item item = PageGetItem(page, itemid);
+            PineconeBufferTuple buffer_tup = *((PineconeBufferTuple*) item);
+            if (!ItemIdIsUsed(itemid)) ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                                                      errmsg("Item is not used")));
+            if (item == NULL) ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                                              errmsg("Item is null")));
+
+            // log the tid of the index tuple
+            elog(DEBUG1, "Flushing tuple with tid %d:%d", ItemPointerGetBlockNumber(&buffer_tup.tid), ItemPointerGetOffsetNumber(&buffer_tup.tid));
+
+            // fetch the tuple from the base table
+            found = baseTableRel->rd_tableam->index_fetch_tuple(fetchData, &buffer_tup.tid, snapshot, slot, &call_again, &all_dead);
+
+            // print the tuple
+            if (!found) {
+                ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                                errmsg("Tuple not found in heap")));
+            }
+            // else {
+                // // todo: cut this else block
+                // elog(NOTICE, "Fetched tuple from heap");
+                // for (int k = 0; k < baseTableRel->rd_att->natts; k++) {
+                    // bool isnull;
+                    // FormData_pg_attribute attr = baseTableRel->rd_att->attrs[k];
+                    // Datum datum = slot_getattr(slot, k + 1, &isnull);
+                    // if (!isnull) {
+                        // int datum_str = DatumGetInt32(datum);
+                        // elog(NOTICE, "Attribute %s: %d", NameStr(attr.attname), datum_str);
+                    // }
+                // }
+                // elog(NOTICE, "That tuple had n attributes where n = %d", baseTableRel->rd_att->natts);
+            // }
+
+            // extract the indexed columns
+            FormIndexDatum(indexInfo, slot, NULL, index_values, index_isnull);
+
+            vector_id = pinecone_id_from_heap_tid(buffer_tup.tid);
+            json_vector = tuple_get_pinecone_vector(index->rd_att, index_values, index_isnull, vector_id);
             cJSON_AddItemToArray(json_vectors, json_vector);
+
         }
 
         // Move to the next page. Stop if there are no more pages.
-        // todo: isn't an opaque unnecessary? Couldn't I just use nextblkno++ and check if it's valid?
+        // todo: isn't this linked list unnecessary? Couldn't I just use nextblkno++ and check if it's valid?
         currentblkno = PineconePageGetOpaque(page)->nextblkno;
         if (!BlockNumberIsValid(currentblkno)) break; 
 
@@ -272,6 +335,12 @@ void FlushToPinecone(Relation index)
         }
     }
     UnlockReleaseBuffer(buf); // release the last buffer
+
+    // end the index fetch
+    ExecDropSingleTupleTableSlot(slot);
+    baseTableRel->rd_tableam->index_fetch_end(fetchData);
+    // close the base table
+    RelationClose(baseTableRel);
 
     // release the lock
     LockRelease(&pinecone_flush_lock, ExclusiveLock, false);

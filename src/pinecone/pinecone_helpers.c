@@ -150,7 +150,8 @@ pinecone_delete_unused_indexes(PG_FUNCTION_ARGS) {
         // deform pinecone_index_name back into index_name, index_oid
         // pinecone_index_name has format ("pgvector-%u-%s-%s", index->rd_id, index_name random_postfix)
         if (sscanf(pinecone_index_name, "pgvector-%u-", &index_oid) != 1) {
-            ereport(ERROR, (errmsg("Failed to parse index name: %s", pinecone_index_name)));
+            ereport(NOTICE, (errmsg("Failed to parse index name: %s", pinecone_index_name)));
+            continue;
         }
 
         // check if the index's oid exists in pg_class 
@@ -218,5 +219,87 @@ pinecone_print_index(PG_FUNCTION_ARGS) {
     #endif
     pinecone_print_relation(index);
     index_close(index, AccessShareLock);
+    elog(NOTICE, "Index closed. (look no reload)");
     PG_RETURN_VOID();
+}
+
+// pinecone_get_index_stats
+PGDLLEXPORT PG_FUNCTION_INFO_V1(pinecone_print_index_stats);
+Datum
+pinecone_print_index_stats(PG_FUNCTION_ARGS) {
+    char* index_name;
+    PineconeStaticMetaPageData meta;
+    cJSON* stats;
+    Oid index_oid;
+    Relation index;
+    index_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    elog(DEBUG1, "Index name: %s", index_name);
+    index_oid = get_index_oid_from_name(index_name);
+    elog(DEBUG1, "Index oid: %u", index_oid);
+    index = index_open(index_oid, AccessShareLock);
+    meta = PineconeSnapshotStaticMeta(index);
+    elog(DEBUG1, "host: %s", meta.host);
+    stats = pinecone_get_index_stats(pinecone_api_key, meta.host);
+    elog(DEBUG1, "Stats: %s", cJSON_Print(stats));
+    index_close(index, AccessShareLock);
+    elog(DEBUG1, "Index closed");
+    PG_RETURN_VOID();
+}
+
+
+// create the mock table
+#ifdef PINECONE_MOCK
+PGDLLEXPORT PG_FUNCTION_INFO_V1(pinecone_create_mock_table);
+Datum
+pinecone_create_mock_table(PG_FUNCTION_ARGS) {
+    char query[256];
+    int ret;
+    sprintf(query, "CREATE TABLE pinecone_mock (id SERIAL PRIMARY KEY, url_prefix TEXT, method TEXT, body TEXT, response TEXT, curl_code INT NOT NULL DEFAULT 0);");
+    SPI_connect();
+    ret = SPI_execute(query, false, 0);
+    if (ret != SPI_OK_UTILITY) {
+        elog(ERROR, "Failed to create table");
+    }
+    SPI_finish();
+    elog(NOTICE, "Mock table created");
+    PG_RETURN_VOID();
+}
+#endif // PINECONE_MOCK
+
+void lookup_mock_response(CURL* hnd, ResponseData* response_data, CURLcode* curl_code) {
+    char query[1024]; // todo: doesn't accomodate large bodies
+    int ret;
+    char* response = NULL;
+    // recover the url from the handle
+    char* url;
+    curl_easy_getinfo(hnd, CURLINFO_EFFECTIVE_URL, &url);
+
+
+    SPI_connect();
+    // we want startswith the url prefix and we can allow any of url_prefix, method, body if they are null
+    sprintf(query, "SELECT response, curl_code FROM pinecone_mock WHERE ('%s' LIKE url_prefix || '%%' OR url_prefix IS NULL) \
+                            AND (method IS NULL OR method = '%s') \
+                            AND (body IS NULL OR body = '%s');", url, response_data->method, response_data->request_body);
+    ret = SPI_execute(query, false, 0);
+    if (ret == SPI_OK_SELECT && SPI_processed > 0) {
+        TupleDesc tupdesc = SPI_tuptable->tupdesc;
+        SPITupleTable *tuptable = SPI_tuptable;
+        HeapTuple tuple = tuptable->vals[0];
+        bool isnull;
+        Datum datum;
+        datum = heap_getattr(tuple, 1, tupdesc, &isnull);
+        if (!isnull) {
+            response = TextDatumGetCString(datum); 
+            response_data->data = palloc(strlen(response) + 1);
+            strcpy(response_data->data, response);
+
+        }
+        datum = heap_getattr(tuple, 2, tupdesc, &isnull);
+        if (!isnull) {
+            *curl_code = DatumGetInt32(datum);
+        }
+    } else {
+        elog(ERROR, "No matching mock response found for query: %s", query);
+    }
+    SPI_finish();
 }
