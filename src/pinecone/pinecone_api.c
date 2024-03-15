@@ -62,7 +62,7 @@ CURL *hnd_t;
 
 cJSON* generic_pinecone_request(const char *api_key, const char *url, const char *method, cJSON *body) {
     // CURL *hnd = curl_easy_init();
-    ResponseData response_data = {"", NULL, NULL, 0};
+    ResponseData response_data = {"", NULL, NULL, 0, ""};
     cJSON *response_json, *error;
     CURLcode ret;
 
@@ -188,8 +188,8 @@ CURL* multi_hnd_for_query;
 cJSON** pinecone_query_with_fetch(const char *api_key, const char *index_host, const int topK, cJSON *query_vector_values, cJSON *filter, bool with_fetch, cJSON* fetch_ids) {
     CURL *query_handle, *fetch_handle;
     cJSON** responses = palloc(2 * sizeof(cJSON*)); // allocate space to return two cJSON* pointers for the query and fetch responses
-    ResponseData query_response_data = {"", NULL, NULL, 0};
-    ResponseData fetch_response_data = {"", NULL, NULL, 0};
+    ResponseData query_response_data = {"", NULL, NULL, 0, ""};
+    ResponseData fetch_response_data = {"", NULL, NULL, 0, ""};
     clock_t start, stop;
     int running;
 
@@ -284,7 +284,7 @@ cJSON* pinecone_bulk_upsert(const char *api_key, const char *index_host, cJSON *
 
     for (int i = 0; i < n_batches; i++) {
         batch = cJSON_GetArrayItem(batches, i);
-        response_data[i] = (ResponseData) {"", NULL, NULL, 0};
+        response_data[i] = (ResponseData) {"", NULL, NULL, 0, ""};
         batch_handle = get_pinecone_upsert_handle(api_key, index_host, cJSON_Duplicate(batch, true), &response_data[i]); // TODO: figure out why i have to deepcopy // because batch goes out of scope
         handles[i] = batch_handle;
         curl_multi_add_handle(multi_handle, batch_handle);
