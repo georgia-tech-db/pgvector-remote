@@ -1,8 +1,10 @@
 -- SETUP
 -- suppress output
 \o /dev/null
+-- apikey
+SET pinecone.api_key = 'fake';
 -- logging level
-SET client_min_messages = notice;
+SET client_min_messages = 'debug1';
 -- flush each vector individually
 SET pinecone.vectors_per_request = 1;
 SET pinecone.requests_per_batch = 1;
